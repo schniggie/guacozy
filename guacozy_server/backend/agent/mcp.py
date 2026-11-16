@@ -5,6 +5,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from backend.agent.errors import fail, ok
+from backend.agent.management import MANAGEMENT_TOOLS
 from backend.agent.tokens import authenticate_bearer
 
 PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
@@ -30,6 +31,7 @@ TOOLS = {
         },
         "handler": whoami,
     },
+    **MANAGEMENT_TOOLS,
 }
 
 
