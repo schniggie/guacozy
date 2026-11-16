@@ -72,10 +72,10 @@ CHILD_INPUT_FIELDS = {
     "ssh": PUBLIC_CHILD_FIELDS["ssh"] + ("private_key", "passphrase"),
 }
 
-# private_key and passphrase are SSH columns. Accept them on every protocol and
-# drop them when the child model has no such column, so a value sent with RDP
-# or VNC is not stored, returned, or logged. Any other unknown field is rejected.
-IGNORED_UNLESS_PRESENT = ("private_key", "passphrase")
+# The required RDP create sends private_key. It is an SSH column, so drop it
+# when the child model has no such column. passphrase stays SSH-only and is
+# INVALID_ARGS on RDP and VNC. Any other unknown field is rejected.
+IGNORED_UNLESS_PRESENT = ("private_key",)
 
 _IDENTITY_KEYS = {"protocol", "name", "host", "parent", "connection_id"}
 
@@ -114,7 +114,7 @@ _FIELD_SCHEMA = {
     },
     "passphrase": {
         "type": "string",
-        "description": "Write-only SSH key passphrase. Ignored for RDP and VNC. Never returned.",
+        "description": "Write-only SSH key passphrase. SSH only. Never returned.",
     },
     "font_size": {"type": "integer"},
     "command": {"type": "string"},

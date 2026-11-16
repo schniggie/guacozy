@@ -503,6 +503,21 @@ class AgentManagementTests(TestCase):
         self.assertEqual(crossed["error"]["retry"], "never")
         self.assertFalse(ConnectionRdp.objects.filter(name="badfield").exists())
 
+    def test_passphrase_on_rdp_or_vnc_is_invalid(self):
+        for protocol, name in (("rdp", "rdp-phrase"), ("vnc", "vnc-phrase")):
+            with self.subTest(protocol=protocol):
+                payload = self.tool("guacozy_create_connection", {
+                    "protocol": protocol,
+                    "name": name,
+                    "host": "10.0.0.12",
+                    "parent": self.folder.id,
+                    "passphrase": "phrase",
+                })
+                self.assertEqual(payload["error"]["code"], "INVALID_ARGS")
+                self.assertEqual(payload["error"]["retry"], "never")
+                self.assertFalse(ConnectionRdp.objects.filter(name=name).exists())
+                self.assertFalse(ConnectionVnc.objects.filter(name=name).exists())
+
     def test_vnc_payload_lists_child_fields(self):
         payload = self.tool("guacozy_create_connection", {
             "protocol": "vnc",
