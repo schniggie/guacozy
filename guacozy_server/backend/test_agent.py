@@ -1066,6 +1066,7 @@ class _FakeGuacd:
         self.mouse_seen = threading.Event()
         self.agent = None
         self.agent_id = None
+        self.reject_next_join = False
         self._stop = False
         self._lock = threading.Lock()
         self._threads = []
@@ -1156,6 +1157,16 @@ class _FakeGuacd:
             if select is None:
                 return
             self._record(select)
+            reject = False
+            if select.args and str(select.args[0]).startswith("$"):
+                with self._lock:
+                    if self.reject_next_join:
+                        self.reject_next_join = False
+                        reject = True
+            if reject:
+                # Drop the join before args/ready. The next client is a new session.
+                self._reset(conn)
+                return
             args = tuple(self.server_args)
             conn.sendall(GuacamoleInstruction("args", *args).encode().encode())
             while True:
@@ -1406,8 +1417,19 @@ class AgentDesktopTests(TestCase):
             GuacamoleInstruction("end", "3"),
             GuacamoleInstruction("sync", "1"),
         ])
-        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
-        self.assertTrue(snap["ok"], snap)
+        # Snapshot returns the last frame immediately. Poll until the red pixel is published.
+        deadline = time.monotonic() + 2
+        snap = None
+        while True:
+            snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+            self.assertTrue(snap["ok"], snap)
+            raw = snap["data"]["png_base64"]
+            if raw:
+                image = Image.open(io.BytesIO(base64.b64decode(raw)))
+                if image.size == (2, 2) and image.getpixel((1, 0))[:3] == (255, 0, 0):
+                    break
+            self.assertLess(time.monotonic(), deadline, "frame was not published")
+            time.sleep(0.01)
         self.assertEqual(
             snap["data"]["note"],
             "Pixels, origin top left. There are no element refs.",
@@ -1450,6 +1472,37 @@ class AgentDesktopTests(TestCase):
         )
         self.ticket.refresh_from_db()
         self.assertEqual(self.ticket.sessionid, existing)
+
+    def test_dead_join_opens_a_new_session(self):
+        dead = uuid.uuid4()
+        self.ticket.sessionid = dead
+        self.ticket.save(update_fields=["sessionid"])
+        self.fake.reject_next_join = True
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["data"]["joined"])
+        self.assertEqual(payload["data"]["width"], 1280)
+        self.assertEqual(payload["data"]["height"], 720)
+        self.assertIn("size", self.fake.opcodes)
+        self.ticket.refresh_from_db()
+        self.assertNotEqual(self.ticket.sessionid, dead)
+        self.assertEqual(self.fake.agent_id, "$" + str(self.ticket.sessionid))
+
+    def test_quiet_snapshot_returns_immediately(self):
+        self._open()
+        started = time.monotonic()
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1)
+        self.assertTrue(snap["ok"], snap)
+        self.assertNotEqual(snap.get("error", {}).get("code"), "STALE_SESSION")
+        self.assertEqual(snap["data"]["width"], 0)
+        self.assertEqual(snap["data"]["height"], 0)
+        self.assertEqual(snap["data"]["png_base64"], "")
+        self.assertEqual(
+            snap["data"]["note"],
+            "Pixels, origin top left. There are no element refs.",
+        )
 
     def test_child_ticket_joins_the_parent_session(self):
         existing = uuid.uuid4()
@@ -1735,6 +1788,24 @@ class AgentDesktopTests(TestCase):
         self.assertEqual(payload["error"]["retry"], "unsafe")
         self.ticket.refresh_from_db()
         self.assertIsNone(self.ticket.sessionid)
+
+    def test_failed_connection_open_deletes_the_ticket(self):
+        closed = GuacdServer.objects.create(
+            name="closed-desktop-guacd",
+            hostname="127.0.0.1",
+            port=_closed_local_port(),
+        )
+        other = ConnectionSsh.objects.create(
+            name="DESKTOP-FAIL",
+            host="10.0.0.9",
+            parent=self.folder,
+            password="s3cret",
+            guacdserver=closed,
+        )
+        payload = self.tool("guacozy_open_desktop", {"connection_id": str(other.id)})
+        self.assertEqual(payload["error"]["code"], "REMOTE_DESKTOP")
+        self.assertEqual(payload["error"]["retry"], "unsafe")
+        self.assertFalse(Ticket.objects.filter(connection=other).exists())
 
     def test_expired_ticket_is_not_found(self):
         self.ticket.created = timezone.now() - timedelta(days=2)

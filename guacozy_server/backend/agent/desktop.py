@@ -1,5 +1,5 @@
 import base64
-import select
+import socket
 import threading
 import uuid
 
@@ -225,6 +225,25 @@ def _store_sessionid(ticket, guacd_id):
     owner.save(update_fields=["sessionid"])
 
 
+def _clear_sessionid(ticket):
+    owner = _session_owner(ticket)
+    owner.sessionid = None
+    owner.save(update_fields=["sessionid"])
+
+
+def _handshake_new(host, port, connection, user, ticket):
+    # Passwords live in this dict. Do not log it.
+    parameters = Connection.objects.get(pk=connection.pk).get_guacamole_parameters(user)
+    client = AgentClient(host, port)
+    try:
+        client.handshake(**parameters)
+        _store_sessionid(ticket, client.id)
+    except (OSError, GuacamoleError, InvalidInstruction, UnicodeError):
+        client.close()
+        raise
+    return client
+
+
 def _guacd_address(connection):
     guacd = connection.guacdserver
     if guacd is None:
@@ -269,17 +288,18 @@ def _peer_gone(session):
             session.dead = True
             session.published.notify_all()
             return True
-        try:
-            readable, _, _ = select.select([sock], [], [], 0)
-        except (OSError, ValueError):
-            session.dead = True
-            session.published.notify_all()
-            return True
-        if not readable:
-            return False
-        # Pending bytes belong to the receive thread. It publishes or marks dead.
-        session.published.wait(timeout=2)
+    # Peek does not consume. A connected socket with nothing queued is not dead.
+    try:
+        peeked = sock.recv(1, socket.MSG_DONTWAIT | socket.MSG_PEEK)
+    except BlockingIOError:
         return session.dead
+    except OSError:
+        session.mark_dead()
+        return True
+    if not peeked:
+        session.mark_dead()
+        return True
+    return session.dead
 
 
 def _transmit(session, instructions):
@@ -337,23 +357,30 @@ def open_desktop(user, arguments):
         source = ticket.parent if ticket.parent_id else ticket
         connection = source.connection
 
+    created = has_connection
     existing = _session_owner(ticket).sessionid
     client = None
+    joined = False
     try:
         host, port = _guacd_address(connection)
-        client = AgentClient(host, port)
         if existing:
-            client.handshake(connectionid="$" + str(existing))
-            joined = True
+            client = AgentClient(host, port)
+            try:
+                client.handshake(connectionid="$" + str(existing))
+                joined = True
+            except (OSError, GuacamoleError, InvalidInstruction, UnicodeError):
+                # Match GuacamoleConsumer: drop the dead join, then open a new session.
+                client.close()
+                client = None
+                _clear_sessionid(ticket)
+                client = _handshake_new(host, port, connection, user, ticket)
         else:
-            # Passwords live in this dict. Do not log it.
-            parameters = Connection.objects.get(pk=connection.pk).get_guacamole_parameters(user)
-            client.handshake(**parameters)
-            joined = False
-            _store_sessionid(ticket, client.id)
+            client = _handshake_new(host, port, connection, user, ticket)
     except (OSError, GuacamoleError, InvalidInstruction, UnicodeError):
         if client is not None:
             client.close()
+        if created:
+            ticket.delete()
         return _remote()
 
     TicketLog.addlog(ticket, "connect")
@@ -384,21 +411,17 @@ def snapshot(user, arguments):
     with session.state_lock:
         if session.dead:
             return _stale("safe")
-        if session.generation == 0:
-            session.published.wait(timeout=5)
-        if session.dead or session.generation == 0:
-            return _stale("safe")
-        try:
-            png = session.frame.png_bytes()
-        except ValueError:
-            return _stale("safe")
         width, height = session.frame.size
         cursor_x, cursor_y = session.frame.cursor
+        try:
+            png_b64 = base64.b64encode(session.frame.png_bytes()).decode("ascii")
+        except ValueError:
+            png_b64 = ""
     return ok({
         "session_id": session.id,
         "width": width,
         "height": height,
-        "png_base64": base64.b64encode(png).decode("ascii"),
+        "png_base64": png_b64,
         "cursor": {"x": cursor_x, "y": cursor_y},
         "note": _NOTE,
     })
