@@ -1,10 +1,15 @@
+import base64
+import io
 import json
 from datetime import datetime, timedelta
 
 from django.contrib.auth.models import Group
-from django.test import Client, TestCase
+from django.test import Client, SimpleTestCase, TestCase
 from django.utils import timezone
+from guacamole.instruction import GuacamoleInstruction
+from PIL import Image
 
+from backend.agent.frame import Frame
 from backend.agent.tokens import authenticate_bearer, create_agent_token, hash_token
 from backend.models import (
     AgentToken,
@@ -947,3 +952,37 @@ class AgentTicketTests(TestCase):
         self.assertTrue(removed["ok"], removed)
         self.assertIsNone(removed["data"]["validto"])
         self.assertFalse(Ticket.objects.filter(pk=bad.id).exists())
+
+
+def _red_png_b64():
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1), (255, 0, 0)).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+RED_PNG_B64 = _red_png_b64()
+
+
+class FrameTests(SimpleTestCase):
+    def test_png_blob_is_pasted_at_xy(self):
+        frame = Frame()
+        frame.apply(GuacamoleInstruction("size", "0", "2", "2"))
+        # 1x1 red PNG, base64, declared at x=1, y=0
+        frame.apply(GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"))
+        frame.apply(GuacamoleInstruction("blob", "3", RED_PNG_B64))
+        frame.apply(GuacamoleInstruction("end", "3"))
+        image = Image.open(io.BytesIO(frame.png_bytes()))
+        self.assertEqual(image.getpixel((1, 0))[:3], (255, 0, 0))
+        self.assertEqual(image.size, (2, 2))
+
+    def test_copy_moves_the_pixel_and_cursor_is_not_drawn(self):
+        frame = Frame()
+        frame.apply(GuacamoleInstruction("size", "0", "2", "2"))
+        frame.apply(GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"))
+        frame.apply(GuacamoleInstruction("blob", "3", RED_PNG_B64))
+        frame.apply(GuacamoleInstruction("end", "3"))
+        frame.apply(GuacamoleInstruction("copy", "0", "0", "1", "0", "1", "1", "0", "1"))
+        frame.apply(GuacamoleInstruction("cursor", "4", "5", "0", "0", "0", "0", "0"))
+        image = Image.open(io.BytesIO(frame.png_bytes()))
+        self.assertEqual(image.getpixel((0, 1))[:3], (255, 0, 0))
+        self.assertEqual(frame.cursor, (4, 5))
