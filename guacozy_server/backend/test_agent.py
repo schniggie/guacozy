@@ -66,6 +66,13 @@ class AgentTokenTests(TestCase):
         self.assertIsNotNone(AgentToken.objects.get(pk=listed[0]["id"]).revoked_at)
         self.assertIsNone(authenticate_bearer("Bearer " + secret))
 
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        inactive, inactive_secret = create_agent_token(self.user, "disabled")
+        self.assertIsNone(authenticate_bearer("Bearer " + inactive_secret))
+        inactive.refresh_from_db()
+        self.assertIsNotNone(inactive.last_used_at)
+
         self.client.force_login(self.other)
         denied = self.client.post(f"/api/agent-tokens/{listed[0]['id']}/revoke/")
         self.assertEqual(denied.status_code, 404)
@@ -493,6 +500,39 @@ class AgentManagementTests(TestCase):
         })
         self.assertTrue(removed["ok"], removed)
         self.assertFalse(Folder.objects.filter(name="UnderShared").exists())
+
+        # A non-staff viewer of a root cannot change it.
+        root_rename = self.tool_as(self.member, "guacozy_update_folder", {
+            "folder_id": self.folder.id, "name": "MemberLab",
+        })
+        self.assertEqual(root_rename["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(root_rename["error"]["retry"], "never")
+        self.assertEqual(Folder.objects.get(pk=self.folder.id).name, "Lab2")
+        empty_root = Folder.objects.create(name="EmptyRoot")
+        FolderPermission.objects.create(folder=empty_root, user=self.member)
+        root_delete = self.tool_as(self.member, "guacozy_delete_folder", {
+            "folder_id": empty_root.id,
+        })
+        self.assertEqual(root_delete["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(root_delete["error"]["retry"], "never")
+        self.assertTrue(Folder.objects.filter(pk=empty_root.id).exists())
+
+        # Direct view of a child is not enough when the parent is hidden.
+        hidden_parent = Folder.objects.create(name="HiddenParent")
+        child = Folder.objects.create(name="VisibleChild", parent=hidden_parent)
+        FolderPermission.objects.create(folder=child, user=self.member)
+        child_rename = self.tool_as(self.member, "guacozy_update_folder", {
+            "folder_id": child.id, "name": "RenamedChild",
+        })
+        self.assertEqual(child_rename["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(child_rename["error"]["retry"], "never")
+        self.assertEqual(Folder.objects.get(pk=child.id).name, "VisibleChild")
+        child_delete = self.tool_as(self.member, "guacozy_delete_folder", {
+            "folder_id": child.id,
+        })
+        self.assertEqual(child_delete["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(child_delete["error"]["retry"], "never")
+        self.assertTrue(Folder.objects.filter(pk=child.id).exists())
 
     def test_member_cannot_update_or_delete_connection(self):
         denied = self.tool_as(self.member, "guacozy_update_connection", {
@@ -1068,6 +1108,7 @@ class _FakeGuacd:
         self.agent = None
         self.agent_id = None
         self.reject_next_join = False
+        self.agent_closed = threading.Event()
         self._stop = False
         self._lock = threading.Lock()
         self._threads = []
@@ -1189,10 +1230,17 @@ class _FakeGuacd:
                 except TimeoutError:
                     continue
                 if instruction is None:
+                    self._mark_agent_closed(conn)
                     return
                 self._record(instruction)
         except OSError:
+            self._mark_agent_closed(conn)
             return
+
+    def _mark_agent_closed(self, conn):
+        with self._lock:
+            if conn is self.agent:
+                self.agent_closed.set()
 
 
 class _OtherJoin:
@@ -1808,6 +1856,107 @@ class AgentDesktopTests(TestCase):
         self.assertEqual(payload["error"]["retry"], "unsafe")
         self.assertFalse(Ticket.objects.filter(connection=other).exists())
 
+    def test_view_only_click_sends_no_mouse(self):
+        self.ticket.control = False
+        self.ticket.save(update_fields=["control"])
+        self._open()
+        before = len(self.fake.sent_copy())
+        payload = self.tool("guacozy_click", {
+            "session_id": self.session_id,
+            "x": 1,
+            "y": 2,
+        })
+        self.assertEqual(payload["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(payload["error"]["retry"], "never")
+        time.sleep(0.2)
+        mice = [opcode for opcode, _args in self.fake.sent_copy()[before:] if opcode == "mouse"]
+        self.assertEqual(mice, [])
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertTrue(snap["ok"], snap)
+        got = self.tool("guacozy_clipboard_get", {"session_id": self.session_id})
+        self.assertTrue(got["ok"], got)
+        for name, arguments in (
+            ("guacozy_type", {"session_id": self.session_id, "text": "a"}),
+            ("guacozy_press", {"session_id": self.session_id, "key": "Enter"}),
+            ("guacozy_scroll", {"session_id": self.session_id, "x": 1, "y": 1, "delta": 1}),
+            ("guacozy_clipboard_set", {"session_id": self.session_id, "text": "nope"}),
+        ):
+            denied = self.tool(name, arguments)
+            self.assertEqual(denied["error"]["code"], "NOT_ALLOWED", name)
+            self.assertEqual(denied["error"]["retry"], "never", name)
+        self.assertEqual(self.fake.sent_copy()[before:], [])
+
+    def test_bad_frame_becomes_stale_and_closes_the_socket(self):
+        self._open()
+        junk = base64.b64encode(b"not a png").decode("ascii")
+        self.fake.send_to_agent([
+            GuacamoleInstruction("size", "0", "2", "2"),
+            GuacamoleInstruction("img", "9", "0", "0", "image/png", "0", "0"),
+            GuacamoleInstruction("blob", "9", junk),
+            GuacamoleInstruction("end", "9"),
+        ])
+        self.assertTrue(self.fake.agent_closed.wait(2))
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertEqual(snap["error"]["code"], "STALE_SESSION")
+        self.assertEqual(snap["error"]["retry"], "safe")
+
+    def test_passthrough_connection_does_not_handshake(self):
+        self.connection.passthrough_credentials = True
+        self.connection.save()
+        before = len(self.fake.sent_copy())
+        opened = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertEqual(opened["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(opened["error"]["retry"], "never")
+        self.assertIn("no browser session password", opened["error"]["message"])
+        self.assertEqual(self.fake.sent_copy()[before:], [])
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.sessionid)
+        created = self.tool("guacozy_open_desktop", {"connection_id": str(self.connection.id)})
+        self.assertEqual(created["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(created["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.exclude(pk=self.ticket.id).exists())
+        self.assertNotIn("connect", self.fake.opcodes)
+
+    def test_click_count_and_type_length_are_bounded(self):
+        self._open()
+        before = len(self.fake.sent_copy())
+        rejected = self.tool("guacozy_click", {
+            "session_id": self.session_id,
+            "x": 1,
+            "y": 1,
+            "count": 6,
+        })
+        self.assertEqual(rejected["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(rejected["error"]["retry"], "never")
+        self.assertEqual(
+            [opcode for opcode, _args in self.fake.sent_copy()[before:] if opcode == "mouse"],
+            [],
+        )
+        accepted = self.tool("guacozy_click", {
+            "session_id": self.session_id,
+            "x": 8,
+            "y": 9,
+            "count": 5,
+        })
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertTrue(self._wait_sent(
+            lambda rows: [args for opcode, args in rows if opcode == "mouse"] == [
+                ["8", "9", "1"], ["8", "9", "0"],
+            ] * 5,
+        ))
+        mice = [args for opcode, args in self.fake.sent if opcode == "mouse"]
+        self.assertEqual(mice, [["8", "9", "1"], ["8", "9", "0"]] * 5)
+        typed = self.tool("guacozy_type", {
+            "session_id": self.session_id,
+            "text": "a" * 2001,
+        })
+        self.assertEqual(typed["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(typed["error"]["retry"], "never")
+        self.assertEqual(
+            [opcode for opcode, _args in self.fake.sent if opcode == "key"],
+            [],
+        )
+
     def test_expired_ticket_is_not_found(self):
         self.ticket.created = timezone.now() - timedelta(days=2)
         self.ticket.validityperiod = timedelta(days=1)
@@ -1819,6 +1968,11 @@ class AgentDesktopTests(TestCase):
 
 
 class AgentGuideTests(SimpleTestCase):
+    def test_desktop_source_does_not_import_tunnel_client(self):
+        text = pathlib.Path(__file__).resolve().parent.joinpath("agent", "desktop.py").read_text()
+        self.assertNotIn("guacdproxy", text)
+        self.assertNotIn("TunnelClient", text)
+
     def test_agents_md_states_the_loop(self):
         text = pathlib.Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text()
         self.assertIn("/mcp/", text)

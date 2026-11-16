@@ -3,12 +3,14 @@ import socket
 import threading
 import uuid
 
+from guacamole.client import GuacamoleClient
 from guacamole.exceptions import GuacamoleError, InvalidInstruction
 from guacamole.instruction import GuacamoleInstruction
 
 from backend.agent.errors import fail, ok
 from backend.agent.frame import Frame
 from backend.agent.management import (
+    _denied,
     _invalid,
     _missing,
     _owned_ticket,
@@ -17,13 +19,15 @@ from backend.agent.management import (
     _visible_connection,
 )
 from backend.models import AppSettings, Connection, Ticket, TicketLog
-from guacozy_server.guacdproxy.consumers import TunnelClient
 
 # Fixed client size for a new session. Join must not send size.
 _WIDTH = 1280
 _HEIGHT = 720
 _DPI = 96
+_MAX_CLICKS = 5
+_MAX_TYPE = 2000
 _NOTE = "Pixels, origin top left. There are no element refs."
+_NO_SESSION_PASSWORD = "The agent has no browser session password."
 _BUTTONS = {"left": 1, "right": 4, "middle": 2}
 _NAMED_KEYS = {
     "Enter": 0xff0d,
@@ -51,25 +55,48 @@ def _remote():
     return fail("REMOTE_DESKTOP", "Could not open the remote desktop.", "unsafe")
 
 
-class AgentClient(TunnelClient):
-    """Tunnel client whose handshake omits size when joining a session."""
+class AgentClient(GuacamoleClient):
+    """Handshake omits size when joining a session. Sends are not logged."""
 
     def __init__(self, host, port, timeout=20, debug=False, logger=None):
         super().__init__(host, port, timeout=timeout, debug=debug, logger=logger)
         self._shut = False
+        self._opened = False
+
+    def relax_read_timeout(self):
+        # create_connection leaves the connect timeout on later reads.
+        if self._client is not None:
+            self._client.settimeout(None)
 
     def close(self):
-        # Refuse a later send that would reconnect through the socket property.
+        # Idempotent. Never reads the client property: that opens a new TCP
+        # connection when _client is None.
         self._shut = True
-        super().close()
+        sock = self._client
+        self._client = None
+        self.connected = False
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def send(self, data):
         if self._shut:
             raise OSError("desktop socket is closed")
         sock = self._client
         if sock is None:
+            # First connect only. Once a socket has existed, do not open another.
+            if self._opened:
+                raise OSError("desktop socket is closed")
             sock = self.client
-        # No instruction logging. Connect args include passwords.
+            self._opened = True
+        # Instruction bodies, clipboard text, and connect args stay off the log.
         sock.sendall(data.encode())
 
     def send_instruction(self, instruction):
@@ -141,14 +168,16 @@ class AgentClient(TunnelClient):
 
 
 class _Session:
-    def __init__(self, user_id, client):
+    def __init__(self, user_id, client, control):
         self.id = str(uuid.uuid4())
         self.user_id = user_id
         self.client = client
+        self.control = bool(control)
         self.frame = Frame()
         self.clipboard = ""
         self.stream_index = 0
         self.dead = False
+        self._clean_shutdown = False
         self.generation = 0
         self.send_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -165,46 +194,48 @@ class _Session:
 
     def shutdown(self):
         # This socket only. The guacd session id on the ticket stays.
+        # Set before close so the reader does not treat this as a dead peer.
+        self._clean_shutdown = True
         self.client.close()
         if self.thread.ident is not None:
             self.thread.join(timeout=2)
         self.mark_dead()
 
     def _receive(self):
-        while not self.client._shut:
-            try:
-                raw = self.client.receive()
-            except OSError:
-                self.mark_dead()
-                return
-            if not raw:
-                self.mark_dead()
-                return
-            try:
-                instruction = GuacamoleInstruction.load(raw)
-            except (InvalidInstruction, UnicodeError):
-                self.mark_dead()
-                return
-            if instruction.opcode == "sync":
-                # Reply before publishing so a snapshot cannot observe an unacked frame.
+        try:
+            while not self.client._shut:
                 try:
-                    with self.send_lock:
-                        self.client.send_instruction(
-                            GuacamoleInstruction("sync", *instruction.args)
-                        )
+                    raw = self.client.receive()
                 except OSError:
-                    self.mark_dead()
                     return
-                with self.state_lock:
-                    self.generation += 1
-                    self.published.notify_all()
-                continue
-            try:
-                with self.state_lock:
-                    self.frame.apply(instruction)
-            except ValueError:
+                if not raw:
+                    return
+                try:
+                    instruction = GuacamoleInstruction.load(raw)
+                except (InvalidInstruction, UnicodeError):
+                    return
+                if instruction.opcode == "sync":
+                    # Reply before publishing so a snapshot cannot observe an unacked frame.
+                    try:
+                        with self.send_lock:
+                            self.client.send_instruction(
+                                GuacamoleInstruction("sync", *instruction.args)
+                            )
+                    except OSError:
+                        return
+                    with self.state_lock:
+                        self.generation += 1
+                        self.published.notify_all()
+                    continue
+                try:
+                    with self.state_lock:
+                        self.frame.apply(instruction)
+                except Exception:
+                    return
+        finally:
+            if not self._clean_shutdown:
+                self.client.close()
                 self.mark_dead()
-                return
 
 
 def _session_owner(ticket):
@@ -327,6 +358,12 @@ def _keysym(key):
     return None
 
 
+def _view_only(session):
+    if session.control:
+        return None
+    return _denied("This share cannot control the desktop.")
+
+
 def open_desktop(user, arguments):
     error = _unexpected(arguments, ("connection_id", "ticket_id"))
     if error is not None:
@@ -340,6 +377,8 @@ def open_desktop(user, arguments):
         connection = _visible_connection(user, arguments["connection_id"])
         if isinstance(connection, dict):
             return connection
+        if connection.passthrough_credentials:
+            return _denied(_NO_SESSION_PASSWORD)
         # Model default lifetime is one day. Opening does not require staff.
         ticket = Ticket.objects.create(
             connection=connection,
@@ -356,6 +395,8 @@ def open_desktop(user, arguments):
             return _missing("Ticket not found.")
         source = ticket.parent if ticket.parent_id else ticket
         connection = source.connection
+        if connection.passthrough_credentials:
+            return _denied(_NO_SESSION_PASSWORD)
 
     created = has_connection
     existing = _session_owner(ticket).sessionid
@@ -384,7 +425,7 @@ def open_desktop(user, arguments):
         return _remote()
 
     TicketLog.addlog(ticket, "connect")
-    session = _Session(user.pk, client)
+    session = _Session(user.pk, client, ticket.control)
     with _SESSIONS_LOCK:
         _SESSIONS[session.id] = session
     session.start()
@@ -444,10 +485,13 @@ def click(user, arguments):
         count = _require_int(arguments, "count")
         if isinstance(count, dict):
             return count
-        if count < 1:
-            return _invalid("count must be a positive integer.")
+        if count < 1 or count > _MAX_CLICKS:
+            return _invalid("count must be from 1 to 5.")
     else:
         count = 1
+    denied = _view_only(session)
+    if denied is not None:
+        return denied
     mask = _BUTTONS[button]
     instructions = []
     for _ in range(count):
@@ -466,6 +510,11 @@ def type_text(user, arguments):
     text = arguments.get("text")
     if not isinstance(text, str):
         return _invalid("text must be a string.")
+    if len(text) > _MAX_TYPE:
+        return _invalid("text must be at most 2000 characters.")
+    denied = _view_only(session)
+    if denied is not None:
+        return denied
     instructions = []
     for character in text:
         keysym = str(ord(character))
@@ -484,6 +533,9 @@ def press(user, arguments):
     keysym = _keysym(arguments.get("key"))
     if keysym is None:
         return _invalid("key is not a supported key.")
+    denied = _view_only(session)
+    if denied is not None:
+        return denied
     symbol = str(keysym)
     error = _transmit(session, [
         GuacamoleInstruction("key", symbol, "1"),
@@ -507,6 +559,9 @@ def scroll(user, arguments):
     delta = _require_int(arguments, "delta")
     if isinstance(delta, dict):
         return delta
+    denied = _view_only(session)
+    if denied is not None:
+        return denied
     steps = min(abs(delta), 5)
     mask = "8" if delta > 0 else "16"
     instructions = []
@@ -535,6 +590,9 @@ def clipboard_set(user, arguments):
     text = arguments.get("text")
     if not isinstance(text, str):
         return _invalid("text must be a string.")
+    denied = _view_only(session)
+    if denied is not None:
+        return denied
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
     if session.dead or session.client._shut:
         return _stale("unsafe")

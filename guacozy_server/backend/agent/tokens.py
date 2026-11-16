@@ -40,4 +40,9 @@ def authenticate_bearer(authorization_header: str | None):
     ).update(last_used_at=timezone.now())
     if not updated:
         return None
-    return token.user
+    # A disabled account must not authenticate, including after last_used_at.
+    user = token.user
+    user.refresh_from_db(fields=["is_active"])
+    if not user.is_active:
+        return None
+    return user

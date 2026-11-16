@@ -183,12 +183,21 @@ def _viewable_parent(user, parent_id, denied_message):
 def _folder_for_change(user, folder_id, denied_message):
     # get_queryset is the list set. perform_update / perform_destroy then
     # require view permission, which excludes ancestors the user can only see
-    # in order to reach a shared child.
+    # in order to reach a shared child. FolderAccessPermission then allows a
+    # root change only for staff, and a child change only when the parent is
+    # viewable.
     if folder_id not in _listable_ids(user):
         return _missing("Folder not found.")
-    if folder_id not in _viewable_ids(user):
+    viewable = _viewable_ids(user)
+    if folder_id not in viewable:
         return _denied(denied_message)
-    return Folder.objects.get(pk=folder_id)
+    folder = Folder.objects.get(pk=folder_id)
+    if folder.parent_id is None:
+        if not user.is_staff:
+            return _denied(denied_message)
+    elif folder.parent_id not in viewable:
+        return _denied(denied_message)
+    return folder
 
 
 def _clean_value(field, value):
