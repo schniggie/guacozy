@@ -1,5 +1,5 @@
-ARG BUILDFRONTENDFROM=node:12.2.0-alpine
-ARG SERVERFROM=python:3.7-alpine
+ARG BUILDFRONTENDFROM=node:26-alpine
+ARG SERVERFROM=python:3.13-alpine
 
 ####################
 # BUILDER FRONTEND #
@@ -9,9 +9,12 @@ FROM ${BUILDFRONTENDFROM} as builder-frontend
 ARG DOCKER_TAG
 ADD frontend/package.json /frontend/
 ADD frontend/package-lock.json /frontend/
+ADD frontend/.npmrc /frontend/
 WORKDIR /frontend
 RUN npm install
 ADD frontend /frontend
+# src/index.jsx imports this file from outside /frontend.
+COPY guacozy_server/static/css/styles.css /guacozy_server/static/css/styles.css
 ENV REACT_APP_VERSION=$DOCKER_TAG
 RUN npm run build
 
@@ -29,14 +32,16 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 # install psycopg2 dependencies
+# The official Python image already ships its own headers. Alpine's
+# python3-dev package is a second interpreter and must not be installed.
 RUN apk update && apk add \
     build-base \
     ca-certificates \
     musl-dev \
-    postgresql-dev \
-    python3-dev \
+    libpq-dev \
     libffi-dev \
-    openldap-dev
+    openldap-dev \
+    cyrus-sasl-dev
 
 COPY guacozy_server/requirements*.txt ./
 RUN pip install --upgrade pip && \
@@ -54,6 +59,8 @@ COPY --from=builder-wheels /usr/src/app/wheels /wheels
 RUN apk update && apk add --no-cache \
       bash \
       libpq \
+      libldap \
+      libsasl \
       ca-certificates \
       openssl \
       memcached \
@@ -80,7 +87,7 @@ RUN mkdir -p /run/nginx && \
     cd /tmp/docker && \
     mv entrypoint.sh /entrypoint.sh && \
     chmod +x /entrypoint.sh && \
-    mv nginx-default.conf /etc/nginx/conf.d/default.conf && \
+    mv nginx-default.conf /etc/nginx/http.d/default.conf && \
     mkdir -p /etc/supervisor.d/ && \
     mv /tmp/docker/supervisor-app.ini /etc/supervisor.d/ && \
     mv /tmp/docker/supervisord.conf /etc/supervisord.conf && \

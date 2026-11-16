@@ -8,7 +8,7 @@ function SettingsSidebar(props) {
     const [appState,] = useContext(AppContext);
 
     return (
-        <Container className='sidebarContainer'>
+        <Container className='sidebarContainer gc-settings'>
             <Segment color='grey'>
                 {SETTINGS_LINKS.map(link =>
                     <>

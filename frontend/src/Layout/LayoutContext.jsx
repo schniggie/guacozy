@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
-import FlexLayout from "flexlayout-react";
+import * as FlexLayout from "flexlayout-react";
 import {defaultLayout} from "./defaultLayout";
+import {tabComponent, tabExists as modelHasTab} from "./ticketTabs";
 
 const LayoutContext = React.createContext([{}, () => {
 }]);
@@ -13,13 +14,13 @@ const LayoutProvider = (props) => {
     };
 
     const refreshTab = (tabid) => {
-        if (tabExists(tabid)) {
-            const oldComponent = state.model.getNodeById(tabid)._attributes.component;
-
-            state.model.doAction(FlexLayout.Actions.updateNodeAttributes(tabid, {component: ""}));
-            setTimeout(() =>
-                state.model.doAction(FlexLayout.Actions.updateNodeAttributes(tabid, {component: oldComponent})), 5);
+        const oldComponent = tabComponent(state.model, tabid);
+        if (oldComponent === undefined) {
+            return;
         }
+        state.model.doAction(FlexLayout.Actions.updateNodeAttributes(tabid, {component: ""}));
+        setTimeout(() =>
+            state.model.doAction(FlexLayout.Actions.updateNodeAttributes(tabid, {component: oldComponent})), 5);
     };
 
     const deleteTab = (tabid) => {
@@ -27,13 +28,7 @@ const LayoutProvider = (props) => {
     };
 
     const tabExists = (ticketid) => {
-        let i;
-        for (i in state.layout.current.tabIds) {
-            if (state.layout.current.tabIds[i] === ticketid) {
-                return true;
-            }
-        }
-        return false;
+        return modelHasTab(state.model, ticketid);
     };
 
     const activateTicket = (ticketid, tabName, controlSize, controlInput) => {

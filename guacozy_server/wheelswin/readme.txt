@@ -1,11 +1,8 @@
 # LDAP
 
-django-auth-ldap need python_ldap package
+django-auth-ldap needs the python-ldap package.
 
-On windows python_ldap package can be installed in wheel form (compiled):
-
-Download needed python_ldap wheels depending on your platform / python version
-https://www.lfd.uci.edu/~gohlke/pythonlibs/#python-ldap
-
-Then install it (example for cPython 3.7 on 64 bit Windows)
-pip install wheels/python_ldap-3.2.0-cp37-cp37m-win_amd64.whl
+The cp37 wheels that used to live in this directory are not an install path.
+requirements-ldap-win.txt installs current python-ldap from PyPI. Building it
+on Windows needs OpenLDAP headers (or a wheel built for that CPython).
+https://www.python-ldap.org/en/python-ldap-3.4.4/installing.html

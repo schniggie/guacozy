@@ -123,7 +123,7 @@ function GuacViewer({wspath, tabIndex, controlSize = true, controlInput = true, 
 
         // nodeSelectCallback - make the node hosting this component active if this component is clicked
         if (nodeSelectCallback) {
-            nodeSelectCallback(node._attributes.id);
+            nodeSelectCallback(node.getId());
         }
     };
 
@@ -373,7 +373,7 @@ function GuacViewer({wspath, tabIndex, controlSize = true, controlInput = true, 
                         Reconnect
                     </Button>
                     <Button inverted color='red'
-                            onClick={() => nodeDeleteCallback(node._attributes.id)}>
+                            onClick={() => nodeDeleteCallback(node.getId())}>
                         Close tab
                     </Button>
                 </Loader>

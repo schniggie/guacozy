@@ -1,0 +1,47 @@
+# Development stack: docker compose -f docker-compose.dev.yml up
+version: '3'
+services:
+  django: 
+    build:
+      context: ./guacozy_server/
+    restart: always
+    depends_on:
+      - db
+    volumes:
+      - ./guacozy_server:/app
+    environment:
+      - DJANGO_SECRET_KEY=youshoulddefinetelychangethistosomethingelseandtakecare
+      - FIELD_ENCRYPTION_KEY=qjq4ObsXMqiqQyfKgD-jjEGm4ep8RaHKGRg4ohGCi1A=
+      - DJANGO_TIME_ZONE=Europe/Vilnius
+      - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
+      - DJANGO_ALLOWED_HOSTS=*
+    ports:
+      - 8000:8000
+  react:
+    build:
+      context: ./frontend/
+    volumes:
+      - ./frontend:/frontend
+      - ./guacozy_server/static/css/styles.css:/guacozy_server/static/css/styles.css:ro
+    ports:
+      - 3000:3000
+    environment:
+      - DJANGO_PROXY_HOST=django
+      - DJANGO_PROXY_PORT=8000
+  guacd:
+    image: guacamole/guacd
+    restart: always
+  db:
+    image: postgres:18-alpine
+    restart: always
+    environment:
+      # The app's DJANGO_DB_URL has no password. Trust keeps that URL working.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+    # PG 18 stores the cluster in /var/lib/postgresql/18/docker.
+    # dev-postgres-data is the pre-18 cluster (PG_VERSION at the volume root).
+    # Mounting that volume here makes Postgres 18 exit 1.
+    - dev-postgres18-data:/var/lib/postgresql
+
+volumes:
+  dev-postgres18-data:

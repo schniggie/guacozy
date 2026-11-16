@@ -6,9 +6,9 @@
 }
 
 .sidebarContainer .ui.segment {
-    margin: 5px !important;
+    margin: var(--gc-space-1, 4px) !important;
     overflow-x: hidden;
-    background-color: #151515;
+    background-color: var(--gc-surface, #151515);
 }
 
 /* Search input segment */
@@ -31,7 +31,7 @@
 }
 
 .connectionCount {
-    color: #404040;
+    color: var(--gc-muted, #404040);
 }
 
 /* topButtonRight inside connectionList segment */
@@ -63,7 +63,7 @@
 }
 
 .sidebarContainer .ui.segments.ticketList div.ticketItem:hover {
-    background-color: #292929;
+    background-color: var(--gc-surface-2, #292929);
 }
 
 .ticketSection {
@@ -71,13 +71,13 @@
 }
 
 .ticketSectionHeader {
-    color: darkgrey;
+    color: var(--gc-muted, darkgrey);
 }
 .sidebarContainer .ui.segments.ticketList div.ticketItem .ticketDetails{
-    background-color: #202020;
+    background-color: var(--gc-ink-2, #202020);
     margin: 5px 0;
     padding: 5px;
-    border: 1px #606060 dashed;
+    border: 1px dashed var(--gc-line, #606060);
 }
 
 .sidebarContainer .ui.segments.ticketList div span:hover.activatable {

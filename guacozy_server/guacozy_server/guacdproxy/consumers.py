@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import socket
 import uuid
 from urllib.parse import parse_qsl
 
@@ -10,6 +12,38 @@ from guacamole.exceptions import GuacamoleError
 from guacamole.instruction import GuacamoleInstruction
 
 from backend.models import Ticket, Connection, AppSettings, TicketLog
+
+logger = logging.getLogger(__name__)
+
+
+class TunnelClient(GuacamoleClient):
+    """Guacamole socket used as a long-lived tunnel.
+
+    create_connection() leaves the connect timeout on every later recv.
+    A quiet desktop then raises TimeoutError and the poller dies.
+    send() and receive() also have to run on different threads: the
+    default sync_to_async executor is a single thread, so a blocking
+    recv would hold mouse, key, and sync instructions until it returns.
+    """
+
+    def relax_read_timeout(self):
+        if self._client is not None:
+            self._client.settimeout(None)
+
+    def close(self):
+        sock = self._client
+        self._client = None
+        self.connected = False
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 class GuacamoleConsumer(AsyncWebsocketConsumer):
@@ -54,7 +88,7 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
             return
 
         # check that user is the proper owner of ticket
-        if ticket.user != self.scope['user']:
+        if not await self.user_owns_ticket(ticket, self.scope['user']):
             # https://guacamole.apache.org/doc/gug/protocol-reference.html#status-codes
             # 771	CLIENT_FORBIDDEN
             # Permission was denied, and logging in will not solve the problem.
@@ -74,7 +108,7 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
         connection = await self.get_ticket_connection(ticket)
 
         # Try getting guacd server from connection
-        guacd = connection.guacdserver
+        guacd = await self.get_connection_guacd(connection)
 
         # If connection has no guacd specified, try default
         if guacd is None:
@@ -86,13 +120,13 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
                 "and no default guacd server specified in app settings", 512)
             return None
 
-        self.gclient = GuacamoleClient(guacd.hostname, guacd.port)
+        self.gclient = TunnelClient(guacd.hostname, guacd.port)
 
         # Check if ticket has session id.
         # This means that session is already in progress and we connect to it
         if sessionid:
             try:
-                await sync_to_async(self.gclient.handshake)(connectionid="$" + sessionid.__str__(), **params)
+                await self._guacd(self.gclient.handshake)(connectionid="$" + sessionid.__str__(), **params)
             except (AttributeError, GuacamoleError):
                 # connection to existing sessioni failed
                 # reset existing sessionid in ticket
@@ -104,9 +138,8 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
 
         if not sessionid:
             # parameters = ticket.connection.get_guacamole_parameters()
-            parameters = Connection.objects.get(
-                pk=ticket.connection.pk).get_guacamole_parameters(
-                self.scope['user'])
+            parameters = await self.get_guacamole_parameters(
+                ticket, self.scope['user'])
 
             if parameters['passthrough_credentials']:
                 try:
@@ -125,7 +158,7 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
                     "If you want to use RDP login screen, "
                     "please explicitly specify security as RDP or TLS", 999)
 
-            await sync_to_async(self.gclient.handshake)(**parameters, **params)
+            await self._guacd(self.gclient.handshake)(**parameters, **params)
             await self.update_ticket_sessionid(ticket, self.gclient.id)
 
         #  If we have successfully connected,
@@ -134,24 +167,47 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
             await self.close()
             return
 
+        await self._guacd(self.gclient.relax_read_timeout)()
+
         # Save ticket reference (so we can update on disconnect) and log event
         self.ticket = ticket
         await self.log_ticket_action(ticket, 'connect', self.scope)
 
         # start polling loop function,
-        asyncio.create_task(self.data_polling())
+        self._polling = asyncio.create_task(self.data_polling())
+        self._polling.add_done_callback(self._polling_finished)
 
         # After we finish handshake and initiated polling loop
         # we accept connection
         await self.accept(subprotocol='guacamole')
+
+    def _guacd(self, func):
+        # Not thread-sensitive: receive blocks, and send must still run.
+        return sync_to_async(func, thread_sensitive=False)
+
+    def _polling_finished(self, task):
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Guacamole poller stopped", exc_info=error)
 
     async def disconnect(self, code):
         """
         Websocket disconnect event handler, which closes session with guacd on  websocket disconnect
         """
         # socket disconnected - inform server that we are out
-        await self.log_ticket_action(self.ticket, 'disconnect', self.scope)
-        await sync_to_async(self.gclient.close)()
+        if self.ticket is not None:
+            await self.log_ticket_action(self.ticket, 'disconnect', self.scope)
+        if self.gclient is not None:
+            await self._guacd(self.gclient.close)()
+        polling = getattr(self, "_polling", None)
+        if polling is not None and not polling.done():
+            polling.cancel()
+            try:
+                await polling
+            except asyncio.CancelledError:
+                pass
 
     async def accept_and_send_error(self, error_text, error_code):
         """
@@ -167,17 +223,21 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
         """
         Webscocket receive even handler - send everything to associated guacd session
         """
+        if text_data is None:
+            return
         if self.allow_control is False and (text_data[0:7] == "5.mouse" or text_data[0:5] == "3.key"):
             return
-        if text_data is not None:
-            await sync_to_async(self.gclient.send)(text_data)
+        await self._guacd(self.gclient.send)(text_data)
 
     async def data_polling(self):
         """
         Polling loop - receives data from GuacamoleClient and passes to websocket
         """
         while True:
-            content = await sync_to_async(self.gclient.receive)()
+            try:
+                content = await self._guacd(self.gclient.receive)()
+            except OSError:
+                return
             if content:
                 # this is dirty workaround for problem.
                 # If we reconnect, servers sends layer size 0x0
@@ -194,6 +254,21 @@ class GuacamoleConsumer(AsyncWebsocketConsumer):
                 if content == "4.size,1.1,1.0,1.0;":
                     continue
                 await self.send(text_data=content)
+            else:
+                return
+
+    @database_sync_to_async
+    def user_owns_ticket(self, ticket, user):
+        return ticket.user == user
+
+    @database_sync_to_async
+    def get_connection_guacd(self, connection):
+        return connection.guacdserver
+
+    @database_sync_to_async
+    def get_guacamole_parameters(self, ticket, user):
+        return Connection.objects.get(
+            pk=ticket.connection.pk).get_guacamole_parameters(user)
 
     @database_sync_to_async
     def update_ticket_sessionid(self, ticket, sessionid):

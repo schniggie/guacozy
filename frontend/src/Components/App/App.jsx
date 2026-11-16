@@ -1,7 +1,7 @@
 import React, {useContext, useEffect, useState} from 'react';
 
-import {Dimmer, Loader} from "semantic-ui-react";
-import FlexLayout from "flexlayout-react";
+import {Confirm, Dimmer, Loader} from "semantic-ui-react";
+import * as FlexLayout from "flexlayout-react";
 
 import {AppContext} from "../../Context/AppContext";
 import {LayoutContext} from "../../Layout/LayoutContext";
@@ -9,7 +9,6 @@ import {layoutFactory} from "../../Layout/layoutfactory";
 import ConnectionContextMenu from "../ContextMenu/ConnectionContextMenu";
 import TabContextMenu from "../ContextMenu/TabContextMenu";
 import FolderContextMenu from "../ContextMenu/FolderContextMenu";
-import Confirm from "semantic-ui-react/dist/commonjs/addons/Confirm";
 import isConnectionSafe from "../../Utils/isConnectionSafe";
 
 function App() {

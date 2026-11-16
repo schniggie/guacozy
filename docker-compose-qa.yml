@@ -1,4 +1,4 @@
-# This is a way do build and deploy application for QA - using same Dockerfile which is used to build official image
+# Same stack as docker-compose.yml. `docker compose up` starts it.
 version: '3'
 services:
   server: &server
@@ -26,10 +26,16 @@ services:
     image: guacamole/guacd
     restart: always
   db:
-    image: postgres:10.4-alpine
+    image: postgres:18-alpine
     restart: always
+    environment:
+      # The app's DJANGO_DB_URL has no password. Trust keeps that URL working.
+      POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
-    - postgres-data:/var/lib/postgresql/data
+    # PG 18 stores the cluster in /var/lib/postgresql/18/docker.
+    # postgres-data is the pre-18 cluster (PG_VERSION at the volume root).
+    # Mounting that volume here makes Postgres 18 exit 1.
+    - postgres18-data:/var/lib/postgresql
 volumes:
-  postgres-data:
+  postgres18-data:
 

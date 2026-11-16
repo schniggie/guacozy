@@ -1,7 +1,8 @@
-FROM node:12.2.0-alpine
+FROM node:26-alpine
 
 ADD package.json /frontend/
 ADD package-lock.json /frontend/
+ADD .npmrc /frontend/
 
 WORKDIR /frontend
 RUN npm install

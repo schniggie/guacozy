@@ -33,6 +33,9 @@ DATABASES = {
 # Application definition
 
 INSTALLED_APPS = [
+    # Daphne's runserver must come first so it serves this project's ASGI app.
+    'daphne',
+
     # Grapelli admin
     'grappelli',
 
@@ -40,10 +43,15 @@ INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
+    'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
 ]
+
+# Historical primary keys are AutoField. Pin that so check does not ask for
+# a BigAutoField migration on every existing model.
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
 # Community packages
 INSTALLED_APPS += [
@@ -89,6 +97,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# Settings opens /admin/ and /api/ in iframes on this origin.
+# Django 6 defaults the header to DENY, which blocks those tabs.
+X_FRAME_OPTIONS = "SAMEORIGIN"
+
 
 # Try using CACHE_URL env and fallback to user local memory cache if not configured
 
@@ -96,6 +108,11 @@ MIDDLEWARE = [
 CACHES = {
     'default': env.cache('CACHE_URL', default='locmemcache://'),
 }
+
+# django-environ 0.14 still maps memcache:// to Django's removed
+# python-memcached backend. Django 4.1+ only ships PyMemcacheCache.
+if CACHES['default']['BACKEND'] == 'django.core.cache.backends.memcached.MemcachedCache':
+    CACHES['default']['BACKEND'] = 'django.core.cache.backends.memcached.PyMemcacheCache'
 
 # Production uses memcached for CACHE_URL (so all instances of Daphne server can access session info)
 # Using cache as session engine and locmemcache as cache will result session clearing
@@ -198,7 +215,7 @@ REST_FRAMEWORK = {
 }
 
 # Specify ASGI routing (needed for channels)
-ASGI_APPLICATION = "guacozy_server.routing.application"
+ASGI_APPLICATION = "guacozy_server.asgi.application"
 
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/'

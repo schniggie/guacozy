@@ -4,7 +4,7 @@ import {Button, Form, Header, Icon, Label, Message, Modal} from "semantic-ui-rea
 import ModalBase from "./ModalBase";
 import {VALIDITY_PERIOD_OPTIONS} from "../../settings";
 import {formatDateString} from "../../Utils/formateDateString";
-import TimeAgo from "react-timeago/lib";
+import TimeAgo from "react-timeago";
 
 function ShareTicketModal({handleClose, data}) {
     const [appState,] = useContext(AppContext);

@@ -8,6 +8,7 @@ import {handleConnectionContextMenuEvent} from "../../ContextMenu/ConnectionCont
 import {handleFolderContextMenuEvent} from "../../ContextMenu/FolderContextMenu";
 import getIcon from "../../../Utils/getIcon";
 import {sortArrayOfObjects} from "../../../Utils/sortArrayOfObjects";
+import {applyConnectionDrop} from "./applyConnectionDrop";
 
 function ConnectionsTree({searchString, draggable, disableDraggebleMode}) {
     const [appState,] = useContext(AppContext);
@@ -20,74 +21,12 @@ function ConnectionsTree({searchString, draggable, disableDraggebleMode}) {
     const [stashedExpandedKeys, setStashedExpandedKeys] = useState([]);
 
 
-    // Taken from author's example:
-    // http://react-component.github.io/tree/examples/draggable.html
     const onDrop = useCallback(
         (info) => {
-            const dropKey = info.node.props.eventKey;
-            const dragKey = info.dragNode.props.eventKey;
-            const dropPos = info.node.props.pos.split('-');
-            const dropPosition = info.dropPosition - Number(dropPos[dropPos.length - 1]);
-
-            // Will not drop connection directly on connection
-            if (info.node.props.isLeaf && dropPosition === 0) {
-                return;
+            const next = applyConnectionDrop(treeData, info);
+            if (next !== treeData) {
+                setTreeData(next);
             }
-
-            const loop = (data, key, callback) => {
-                data.forEach((item, index, arr) => {
-                    if (item.key === key) {
-                        callback(item, index, arr);
-                        return;
-                    }
-                    if (item.children) {
-                        loop(item.children, key, callback);
-                    }
-                });
-            };
-
-            const data = [...treeData];
-
-            // Find dragObject and delete it from tree
-            let dragObj;
-            loop(data, dragKey, (item, index, arr) => {
-                arr.splice(index, 1);
-                dragObj = item;
-            });
-
-            if (!info.dropToGap) {
-                // Drop on the content
-                loop(data, dropKey, (item) => {
-                    item.children = item.children || [];
-                    // where to insert
-                    item.children.push(dragObj);
-                });
-            } else if (
-                (info.node.props.children || []).length > 0 &&  // Has children
-                info.node.props.expanded &&                     // Is expanded
-                dropPosition === 1                              // On the bottom gap
-            ) {
-                loop(data, dropKey, (item) => {
-                    item.children = item.children || [];
-                    // where to insert
-                    item.children.unshift(dragObj);
-                });
-            } else {
-                // Drop on the gap
-                let ar;
-                let i;
-                loop(data, dropKey, (item, index, arr) => {
-                    ar = arr;
-                    i = index;
-                });
-                if (dropPosition === -1) {
-                    ar.splice(i, 0, dragObj);
-                } else {
-                    ar.splice(i + 1, 0, dragObj);
-                }
-            }
-
-            setTreeData(data)
         }, [treeData]);
 
     // Convert tree to flat objects and add "parent" reference
