@@ -172,4 +172,7 @@ class Frame:
         if replace:
             dest.paste(patch, (x, y))
         else:
-            dest.paste(patch, (x, y), patch)
+            # Using the RGBA patch as its own mask lerps each channel.
+            # Source-over keeps a partial-alpha pixel intact over transparency.
+            under = dest.crop((x, y, x + patch.width, y + patch.height))
+            dest.paste(Image.alpha_composite(under, patch), (x, y))
