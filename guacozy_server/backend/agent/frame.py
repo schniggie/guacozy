@@ -76,11 +76,11 @@ class Frame:
             resized.paste(existing, (0, 0))
         self._layers[index] = resized
 
-    def _img(self, stream, mime, mask, layer, x, y):
+    def _img(self, stream, mode, layer, mime, x, y):
         if mime != "image/png":
             raise ValueError(f"unsupported mime: {mime}")
-        # The mask is accepted and ignored. The PNG is pasted with its own alpha.
-        int(mask)
+        # Composite mode is accepted and ignored. The PNG is pasted with its own alpha.
+        int(mode)
         self._streams[str(stream)] = {
             "layer": int(layer),
             "x": int(x),
@@ -103,8 +103,7 @@ class Frame:
             patch = image.convert("RGBA")
         self._paint(entry["layer"], patch, entry["x"], entry["y"], replace=False)
 
-    def _rect(self, mask, layer, x, y, width, height):
-        int(mask)
+    def _rect(self, layer, x, y, width, height):
         self._rects[int(layer)] = (int(x), int(y), int(width), int(height))
 
     def _cfill(self, mask, layer, red, green, blue, alpha):
