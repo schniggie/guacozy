@@ -968,7 +968,7 @@ class FrameTests(SimpleTestCase):
         frame = Frame()
         frame.apply(GuacamoleInstruction("size", "0", "2", "2"))
         # 1x1 red PNG, base64, declared at x=1, y=0
-        frame.apply(GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"))
+        frame.apply(GuacamoleInstruction("img", "3", "image/png", "0", "0", "1", "0"))
         frame.apply(GuacamoleInstruction("blob", "3", RED_PNG_B64))
         frame.apply(GuacamoleInstruction("end", "3"))
         image = Image.open(io.BytesIO(frame.png_bytes()))
@@ -978,11 +978,22 @@ class FrameTests(SimpleTestCase):
     def test_copy_moves_the_pixel_and_cursor_is_not_drawn(self):
         frame = Frame()
         frame.apply(GuacamoleInstruction("size", "0", "2", "2"))
-        frame.apply(GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"))
+        frame.apply(GuacamoleInstruction("img", "3", "image/png", "0", "0", "1", "0"))
         frame.apply(GuacamoleInstruction("blob", "3", RED_PNG_B64))
         frame.apply(GuacamoleInstruction("end", "3"))
-        frame.apply(GuacamoleInstruction("copy", "0", "0", "1", "0", "1", "1", "0", "1"))
+        frame.apply(GuacamoleInstruction("copy", "0", "1", "0", "1", "1", "0", "0", "0", "1"))
         frame.apply(GuacamoleInstruction("cursor", "4", "5", "0", "0", "0", "0", "0"))
         image = Image.open(io.BytesIO(frame.png_bytes()))
         self.assertEqual(image.getpixel((0, 1))[:3], (255, 0, 0))
         self.assertEqual(frame.cursor, (4, 5))
+
+    def test_cfill_fills_the_rect_on_that_layer(self):
+        frame = Frame()
+        frame.apply(GuacamoleInstruction("size", "0", "2", "2"))
+        before = frame.png_bytes()
+        frame.apply(GuacamoleInstruction("cfill", "1", "0", "0", "0", "255", "255"))
+        self.assertEqual(frame.png_bytes(), before)
+        frame.apply(GuacamoleInstruction("rect", "1", "0", "0", "1", "1", "1"))
+        frame.apply(GuacamoleInstruction("cfill", "1", "0", "0", "0", "255", "255"))
+        image = Image.open(io.BytesIO(frame.png_bytes()))
+        self.assertEqual(image.getpixel((0, 1))[:3], (0, 0, 255))

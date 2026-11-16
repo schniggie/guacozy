@@ -76,10 +76,11 @@ class Frame:
             resized.paste(existing, (0, 0))
         self._layers[index] = resized
 
-    def _img(self, stream, _mode, layer, mime, x, y):
+    def _img(self, stream, mime, mask, layer, x, y):
         if mime != "image/png":
             raise ValueError(f"unsupported mime: {mime}")
-        # Composite mode is not applied. The PNG is pasted with its own alpha.
+        # The mask is accepted and ignored. The PNG is pasted with its own alpha.
+        int(mask)
         self._streams[str(stream)] = {
             "layer": int(layer),
             "x": int(x),
@@ -102,10 +103,12 @@ class Frame:
             patch = image.convert("RGBA")
         self._paint(entry["layer"], patch, entry["x"], entry["y"], replace=False)
 
-    def _rect(self, layer, x, y, width, height):
+    def _rect(self, mask, layer, x, y, width, height):
+        int(mask)
         self._rects[int(layer)] = (int(x), int(y), int(width), int(height))
 
-    def _cfill(self, layer, red, green, blue, alpha):
+    def _cfill(self, mask, layer, red, green, blue, alpha):
+        int(mask)
         rect = self._rects.get(int(layer))
         if rect is None:
             return
@@ -116,7 +119,10 @@ class Frame:
         overlay = Image.new("RGBA", (width, height), color)
         self._paint(int(layer), overlay, x, y, replace=True)
 
-    def _copy(self, dst_layer, src_layer, src_x, src_y, width, height, dst_x, dst_y):
+    def _copy(
+        self, src_layer, src_x, src_y, width, height, mask, dst_layer, dst_x, dst_y,
+    ):
+        int(mask)
         src = self._layer(int(src_layer))
         sx, sy = int(src_x), int(src_y)
         sw, sh = int(width), int(height)
@@ -141,7 +147,7 @@ class Frame:
         self._paint(int(dst_layer), patch, dx, dy, replace=True)
 
     def _cursor_op(self, x, y, *_source):
-        # The remaining args are the pointer image. It is not drawn.
+        # x, y are the hotspot. The source rectangle is the pointer image and is not drawn.
         self._cursor = (int(x), int(y))
 
     def _paint(self, layer_index, patch, x, y, *, replace):
