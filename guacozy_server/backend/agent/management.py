@@ -517,13 +517,17 @@ def delete_connection(user, arguments):
 
 
 def _ticket_payload(ticket):
-    validto = timezone.localtime(ticket.created + ticket.validityperiod)
+    # A row saved earlier can still sum past year 9999. Do not fail the list.
+    try:
+        validto = timezone.localtime(ticket.created + ticket.validityperiod).isoformat()
+    except OverflowError:
+        validto = None
     return {
         "id": str(ticket.id),
         "connection_id": str(ticket.connection_id),
         "control": ticket.control,
         "parent": None if ticket.parent_id is None else str(ticket.parent_id),
-        "validto": validto.isoformat(),
+        "validto": validto,
     }
 
 
@@ -636,6 +640,8 @@ def create_ticket(user, arguments):
         return connection
     try:
         period = timedelta(seconds=seconds)
+        # Reject before insert. datetime cannot add a period past year 9999.
+        timezone.now() + period
     except OverflowError:
         return _invalid("validity_seconds is invalid.")
     ticket = Ticket.objects.create(

@@ -917,3 +917,33 @@ class AgentTicketTests(TestCase):
             payload["data"]["validto"],
             timezone.localtime(ticket.created + ticket.validityperiod).isoformat(),
         )
+
+    def test_unrepresentable_lifetime_creates_nothing(self):
+        rejected = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+            "validity_seconds": 10**12,
+        })
+        self.assertEqual(rejected["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(rejected["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.filter(connection=self.visible).exists())
+
+        bad = Ticket.objects.create(
+            connection=self.visible,
+            user=self.member,
+            author=self.member,
+            validityperiod=timedelta(seconds=10**12),
+        )
+        good = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertTrue(good["ok"], good)
+        listed = self.tool_as(self.member, "guacozy_list_tickets", {})
+        self.assertTrue(listed["ok"], listed)
+        rows = {row["id"]: row for row in listed["data"]["tickets"]}
+        self.assertIn(str(bad.id), rows)
+        self.assertIn(good["data"]["id"], rows)
+        self.assertIsNone(rows[str(bad.id)]["validto"])
+        removed = self.tool_as(self.member, "guacozy_delete_ticket", {"ticket_id": str(bad.id)})
+        self.assertTrue(removed["ok"], removed)
+        self.assertIsNone(removed["data"]["validto"])
+        self.assertFalse(Ticket.objects.filter(pk=bad.id).exists())
