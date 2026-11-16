@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import logging
+import pathlib
 import socket
 import struct
 import threading
@@ -1815,3 +1816,13 @@ class AgentDesktopTests(TestCase):
         self.assertEqual(payload["error"]["code"], "NOT_FOUND")
         self.assertEqual(payload["error"]["retry"], "never")
         self.assertFalse(Ticket.objects.filter(pk=self.ticket.id).exists())
+
+
+class AgentGuideTests(SimpleTestCase):
+    def test_agents_md_states_the_loop(self):
+        text = pathlib.Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text()
+        self.assertIn("/mcp/", text)
+        self.assertIn("Authorization: Bearer", text)
+        self.assertIn("guacozy_snapshot", text)
+        self.assertIn("STALE_SESSION", text)
+        self.assertIn("pixel", text.lower())
