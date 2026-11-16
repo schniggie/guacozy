@@ -1,27 +1,319 @@
+/* Guacozy visual system. Login and the session shell both load this file. */
+
+:root {
+    --gc-font: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+    --gc-display: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+    --gc-ink: #101612;
+    --gc-ink-2: #17211c;
+    --gc-surface: #1c2822;
+    --gc-surface-2: #243129;
+    --gc-line: #3c5146;
+    --gc-text: #e8f2eb;
+    --gc-muted: #93a89b;
+    --gc-brass: #e0b15a;
+    --gc-brass-deep: #a67c32;
+    --gc-leaf: #3cba86;
+    --gc-danger: #e07a72;
+    --gc-space-1: 4px;
+    --gc-space-2: 8px;
+    --gc-space-3: 16px;
+    --gc-space-4: 24px;
+    --gc-space-5: 40px;
+    --gc-radius: 16px;
+    --gc-shadow: 0 28px 70px rgba(0, 0, 0, 0.38);
+
+    --flexlayout-color-text: var(--gc-text);
+    --flexlayout-color-background: var(--gc-ink);
+    --flexlayout-color-base: var(--gc-ink);
+    --flexlayout-color-1: var(--gc-ink-2);
+    --flexlayout-color-2: var(--gc-surface);
+    --flexlayout-color-3: var(--gc-surface-2);
+    --flexlayout-color-4: var(--gc-line);
+    --flexlayout-color-5: #314239;
+    --flexlayout-color-6: #3d5247;
+    --flexlayout-font-family: var(--gc-font);
+    --flexlayout-font-size: 13px;
+    --flexlayout-color-tab-selected: var(--gc-ink);
+    --flexlayout-color-tab-selected-background: var(--gc-brass);
+    --flexlayout-color-tab-unselected: var(--gc-muted);
+    --flexlayout-color-border-tab-selected: var(--gc-ink);
+    --flexlayout-color-border-tab-selected-background: var(--gc-brass);
+    --flexlayout-color-border-tab-unselected: var(--gc-muted);
+    --flexlayout-color-focus: var(--gc-brass);
+    --flexlayout-color-splitter: var(--gc-ink-2);
+    --flexlayout-color-splitter-hover: var(--gc-brass-deep);
+    --flexlayout-splitter-size: 6px;
+}
+
+html,
 body {
-    background-image: url('../img/earth.jpg');
-    background-attachment: fixed;
-    background-position: center;
-    background-repeat: no-repeat;
-    background-size: cover;
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    color: var(--gc-text);
+    font-family: var(--gc-font);
+    background:
+        radial-gradient(1100px 640px at 8% -12%, rgba(224, 177, 90, 0.18), transparent 58%),
+        radial-gradient(820px 520px at 108% 0%, rgba(60, 186, 134, 0.14), transparent 52%),
+        var(--gc-ink);
+}
+
+#root,
+.App {
+    height: 100%;
+}
+
+.gc-kicker {
+    margin: 0 0 var(--gc-space-2);
+    color: var(--gc-brass);
+    font-family: var(--gc-font);
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.gc-wordmark {
+    margin: 0 0 var(--gc-space-4);
+    color: var(--gc-text);
+    font-family: var(--gc-display);
+    font-size: 2.4rem;
+    font-weight: 560;
+    letter-spacing: -0.03em;
+    line-height: 1;
 }
 
 #login-container {
-    height: 100%;
+    box-sizing: border-box;
+    min-height: 100%;
     display: flex;
     align-items: center;
+    padding: var(--gc-space-4);
 }
 
-#login-segment {
-    background-color: unset;
-    width: 600px;
+#login-segment.ui.segment {
+    width: min(680px, 100%);
     margin: 0 auto;
+    padding: var(--gc-space-4);
+    background: var(--gc-surface);
+    border: 1px solid var(--gc-line);
+    border-radius: var(--gc-radius);
+    box-shadow: var(--gc-shadow);
 }
 
 #login-segment .logingrid {
-    background-color: rgba(0, 0, 0, 0.3);
+    background: transparent;
+    margin: 0;
 }
 
-#login-segment label{
-    color: #FFFFFF;
+#login-segment .ui.image {
+    display: block;
+    width: 96px;
+    margin: 0 auto;
+    border-radius: var(--gc-radius);
+}
+
+#login-segment .ui.divider {
+    display: none;
+}
+
+#login-segment label,
+#login-segment .ui.form .field > label {
+    color: var(--gc-muted);
+    font-family: var(--gc-font);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+#login-segment .ui.form input,
+#login-segment .ui.form input[type="password"] {
+    background: var(--gc-ink);
+    color: var(--gc-text);
+    border: 1px solid var(--gc-line);
+    border-radius: 10px;
+    padding: var(--gc-space-2) var(--gc-space-3);
+    font-family: var(--gc-font);
+}
+
+#login-segment .ui.form input:focus {
+    border-color: var(--gc-brass);
+    background: var(--gc-ink);
+    color: var(--gc-text);
+}
+
+#login-segment .ui.button,
+#login-segment .ui.inverted.green.basic.button,
+#login-segment .ui.inverted.green.basic.button:hover,
+#login-segment .ui.inverted.green.basic.button:focus {
+    margin-top: var(--gc-space-3);
+    background: var(--gc-brass) !important;
+    color: var(--gc-ink) !important;
+    border: 0 !important;
+    border-radius: 999px !important;
+    padding: var(--gc-space-2) var(--gc-space-4);
+    font-family: var(--gc-font);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    box-shadow: none !important;
+    text-shadow: none !important;
+}
+
+#login-segment .ui.error.message {
+    background: transparent;
+    color: var(--gc-danger);
+    box-shadow: none;
+}
+
+.gc-welcome {
+    box-sizing: border-box;
+    height: 100%;
+    overflow: auto;
+    padding: var(--gc-space-5);
+    color: var(--gc-text);
+    font-family: var(--gc-font);
+    background:
+        radial-gradient(700px 280px at 100% 0%, rgba(224, 177, 90, 0.1), transparent 60%),
+        var(--gc-ink);
+}
+
+.gc-welcome-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--gc-space-4);
+    margin-bottom: var(--gc-space-5);
+}
+
+.gc-user-name {
+    margin: 0;
+    color: var(--gc-text);
+    font-family: var(--gc-display);
+    font-size: 2rem;
+    font-weight: 560;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+}
+
+.gc-logout {
+    flex: 0 0 auto;
+    background: transparent;
+    color: var(--gc-brass);
+    border: 1px solid var(--gc-brass);
+    border-radius: 999px;
+    padding: var(--gc-space-2) var(--gc-space-4);
+    font-family: var(--gc-font);
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+}
+
+.gc-logout:hover {
+    background: var(--gc-brass);
+    color: var(--gc-ink);
+}
+
+.gc-panel {
+    margin-bottom: var(--gc-space-4);
+    padding: var(--gc-space-4);
+    background: var(--gc-surface);
+    border: 1px solid var(--gc-line);
+    border-radius: var(--gc-radius);
+}
+
+.gc-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gc-space-3);
+    margin: var(--gc-space-3) 0 0;
+}
+
+.gc-stats div {
+    min-width: 88px;
+}
+
+.gc-stats dt {
+    color: var(--gc-muted);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.gc-stats dd {
+    margin: var(--gc-space-1) 0 0;
+    color: var(--gc-text);
+    font-family: var(--gc-display);
+    font-size: 1.8rem;
+    line-height: 1;
+}
+
+.gc-docs {
+    color: var(--gc-muted);
+    font-size: 0.85rem;
+}
+
+.gc-docs a {
+    color: var(--gc-brass);
+}
+
+.gc-token-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gc-space-2);
+    margin-top: var(--gc-space-3);
+}
+
+.gc-token-secret {
+    margin: var(--gc-space-3) 0 0;
+    overflow-wrap: anywhere;
+}
+
+.sidebarContainer .ui.segment {
+    background: var(--gc-surface);
+    border: 1px solid var(--gc-line);
+    border-radius: 12px;
+    box-shadow: none;
+    color: var(--gc-text);
+}
+
+.sidebarContainer .ui.input input {
+    background: var(--gc-ink);
+    color: var(--gc-text);
+    border-color: var(--gc-line);
+    font-family: var(--gc-font);
+}
+
+.sidebarContainer .ui.button {
+    color: var(--gc-muted);
+}
+
+.gc-settings a {
+    color: var(--gc-brass);
+    font-family: var(--gc-font);
+}
+
+.ui.selection.dropdown {
+    background-color: var(--gc-surface-2);
+    color: var(--gc-text);
+}
+
+.ui.dropdown .menu {
+    background-color: var(--gc-ink-2);
+}
+
+.ui.dropdown .menu > .item,
+.ui.dropdown .menu .active.item,
+.ui.search.dropdown > input.search,
+.ui.dropdown .menu > .message:not(.ui) {
+    color: var(--gc-muted);
+}
+
+.ui.dropdown .menu > .item:hover,
+.ui.dropdown .menu .selected.item,
+.ui.dropdown.selected {
+    color: var(--gc-text);
 }

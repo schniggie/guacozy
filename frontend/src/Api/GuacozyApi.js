@@ -48,7 +48,9 @@ export default class GuacadminApi {
     }
 
     logout() {
-        return this.apiInstance.get("/accounts/logout/", {baseURL: "/"})
+        // Django's LogoutView accepts POST only. The axios instance sends the
+        // csrftoken cookie as X-CSRFToken.
+        return this.apiInstance.post("/accounts/logout/", undefined, {baseURL: "/"})
     }
 
     getConnections() {
@@ -124,6 +126,18 @@ export default class GuacadminApi {
     deleteFolder = ({id}) => {
         return this.apiInstance.delete("/folders/" + id + "/");
     };
+
+    getAgentTokens() {
+        return this.apiInstance.get("/agent-tokens/");
+    }
+
+    createAgentToken(name) {
+        return this.apiInstance.post("/agent-tokens/", {name});
+    }
+
+    revokeAgentToken(id) {
+        return this.apiInstance.post("/agent-tokens/" + id + "/revoke/");
+    }
 
     // renameNode = ({id, newName, isFolder}) => {
     //     let bodyFormData = new FormData();
