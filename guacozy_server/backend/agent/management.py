@@ -1,9 +1,12 @@
 import logging
 import uuid
+from datetime import timedelta
 
+from django.contrib.auth.models import Group
 from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import DataError, IntegrityError, transaction
-from django.db.models import BooleanField, CharField, IntegerField, TextField
+from django.db.models import BooleanField, CharField, IntegerField, Q, TextField
+from django.utils import timezone
 from mptt.exceptions import InvalidMove
 
 from backend.agent.errors import fail, ok
@@ -14,8 +17,11 @@ from backend.models import (
     ConnectionSsh,
     ConnectionVnc,
     Folder,
+    FolderPermission,
     GuacdServer,
+    Ticket,
 )
+from users.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +516,153 @@ def delete_connection(user, arguments):
     return ok(payload)
 
 
+def _ticket_payload(ticket):
+    validto = timezone.localtime(ticket.created + ticket.validityperiod)
+    return {
+        "id": str(ticket.id),
+        "connection_id": str(ticket.connection_id),
+        "control": ticket.control,
+        "parent": None if ticket.parent_id is None else str(ticket.parent_id),
+        "validto": validto.isoformat(),
+    }
+
+
+def _owned_tickets(user):
+    # Same author-or-holder filter as TicketViewSet.get_queryset.
+    # That viewset also deletes every user's expired rows. These tools do not.
+    return Ticket.objects.filter(Q(user=user) | Q(author=user))
+
+
+def _owned_ticket(user, ticket_id):
+    if not isinstance(ticket_id, str):
+        return _invalid("ticket_id must be a string.")
+    try:
+        parsed = uuid.UUID(ticket_id)
+    except ValueError:
+        return _invalid("ticket_id must be a ticket id.")
+    try:
+        return _owned_tickets(user).get(pk=parsed)
+    except Ticket.DoesNotExist:
+        return _missing("Ticket not found.")
+
+
+def _one_principal(arguments):
+    user_id = arguments.get("user_id")
+    group_id = arguments.get("group_id")
+    if (user_id is None) == (group_id is None):
+        return _invalid("Exactly one of user_id and group_id is required.")
+    if user_id is not None and not _is_int_id(user_id):
+        return _invalid("user_id must be a user id.")
+    if group_id is not None and not _is_int_id(group_id):
+        return _invalid("group_id must be a group id.")
+    return user_id, group_id
+
+
+def set_folder_access(user, arguments):
+    error = _unexpected(arguments, ("folder_id", "action", "user_id", "group_id"))
+    if error is not None:
+        return error
+    if "folder_id" not in arguments:
+        return _invalid("folder_id is required.")
+    if not _is_int_id(arguments["folder_id"]):
+        return _invalid("folder_id must be a folder id.")
+    action = arguments.get("action")
+    if action not in ("grant", "revoke"):
+        return _invalid("action must be grant or revoke.")
+    principal = _one_principal(arguments)
+    if isinstance(principal, dict):
+        return principal
+    user_id, group_id = principal
+    if not user.is_staff:
+        return _denied("You are not allowed to change folder access.")
+    # Staff grant, not the view list: any existing folder id is addressable.
+    try:
+        folder = Folder.objects.get(pk=arguments["folder_id"])
+    except Folder.DoesNotExist:
+        return _missing("Folder not found.")
+    if user_id is not None:
+        try:
+            target_user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return _missing("User not found.")
+        rows = FolderPermission.objects.filter(folder=folder, user=target_user)
+        if action == "grant":
+            if not rows.exists():
+                FolderPermission.objects.create(folder=folder, user=target_user)
+        else:
+            rows.delete()
+        granted_user = target_user.pk
+        granted_group = None
+    else:
+        try:
+            target_group = Group.objects.get(pk=group_id)
+        except Group.DoesNotExist:
+            return _missing("Group not found.")
+        rows = FolderPermission.objects.filter(folder=folder, group=target_group)
+        if action == "grant":
+            if not rows.exists():
+                FolderPermission.objects.create(folder=folder, group=target_group)
+        else:
+            rows.delete()
+        granted_user = None
+        granted_group = target_group.pk
+    return ok({
+        "folder_id": folder.id,
+        "action": action,
+        "user_id": granted_user,
+        "group_id": granted_group,
+    })
+
+
+def list_tickets(user, arguments):
+    error = _unexpected(arguments, ())
+    if error is not None:
+        return error
+    tickets = _owned_tickets(user).order_by("created", "id")
+    return ok({"tickets": [_ticket_payload(ticket) for ticket in tickets]})
+
+
+def create_ticket(user, arguments):
+    error = _unexpected(arguments, ("connection_id", "validity_seconds"))
+    if error is not None:
+        return error
+    if "connection_id" not in arguments:
+        return _invalid("connection_id is required.")
+    seconds = arguments.get("validity_seconds", 86400)
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 1:
+        return _invalid("validity_seconds must be a positive integer.")
+    connection = _visible_connection(user, arguments["connection_id"])
+    if isinstance(connection, dict):
+        return connection
+    try:
+        period = timedelta(seconds=seconds)
+    except OverflowError:
+        return _invalid("validity_seconds is invalid.")
+    ticket = Ticket.objects.create(
+        connection=connection,
+        user=user,
+        author=user,
+        control=True,
+        parent=None,
+        validityperiod=period,
+    )
+    return ok(_ticket_payload(ticket))
+
+
+def delete_ticket(user, arguments):
+    error = _unexpected(arguments, ("ticket_id",))
+    if error is not None:
+        return error
+    if "ticket_id" not in arguments:
+        return _invalid("ticket_id is required.")
+    ticket = _owned_ticket(user, arguments["ticket_id"])
+    if isinstance(ticket, dict):
+        return ticket
+    payload = _ticket_payload(ticket)
+    ticket.delete()
+    return ok(payload)
+
+
 def _schema(properties, required=None):
     schema = {
         "type": "object",
@@ -597,5 +750,44 @@ MANAGEMENT_TOOLS = {
         {"connection_id": {"type": "string"}},
         ("connection_id",),
         delete_connection,
+    ),
+}
+
+
+ACCESS_TOOLS = {
+    "guacozy_set_folder_access": _tool(
+        "Grant or revoke one user or one group on a folder. Staff only.",
+        {
+            "folder_id": _FOLDER_ID,
+            "action": {"type": "string", "enum": ["grant", "revoke"]},
+            "user_id": {"type": "integer"},
+            "group_id": {"type": "integer"},
+        },
+        ("folder_id", "action"),
+        set_folder_access,
+    ),
+    "guacozy_list_tickets": _tool(
+        "List tickets this user authors or holds.",
+        {},
+        None,
+        list_tickets,
+    ),
+    "guacozy_create_ticket": _tool(
+        "Create a ticket for a visible connection. The caller is the author and the holder.",
+        {
+            "connection_id": {"type": "string"},
+            "validity_seconds": {
+                "type": "integer",
+                "description": "Lifetime in seconds. Defaults to 86400.",
+            },
+        },
+        ("connection_id",),
+        create_ticket,
+    ),
+    "guacozy_delete_ticket": _tool(
+        "Delete a ticket this user authors or holds.",
+        {"ticket_id": {"type": "string"}},
+        ("ticket_id",),
+        delete_ticket,
     ),
 }

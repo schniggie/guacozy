@@ -1,5 +1,7 @@
 import json
+from datetime import datetime, timedelta
 
+from django.contrib.auth.models import Group
 from django.test import Client, TestCase
 from django.utils import timezone
 
@@ -11,6 +13,7 @@ from backend.models import (
     ConnectionVnc,
     Folder,
     FolderPermission,
+    Ticket,
 )
 from users.models import User
 
@@ -126,6 +129,10 @@ class AgentMcpTests(TestCase):
                 "guacozy_create_connection",
                 "guacozy_update_connection",
                 "guacozy_delete_connection",
+                "guacozy_set_folder_access",
+                "guacozy_list_tickets",
+                "guacozy_create_ticket",
+                "guacozy_delete_ticket",
             ],
         )
 
@@ -546,4 +553,367 @@ class AgentManagementTests(TestCase):
                 "repeater_dest_port", "reverse_connect", "listen_timeout",
                 "clipboard_encoding",
             },
+        )
+
+
+class AgentTicketTests(TestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username="ticket-staff",
+            password="secret",
+            is_staff=True,
+        )
+        self.member = User.objects.create_user(
+            username="ticket-member",
+            password="secret",
+            is_staff=False,
+        )
+        self.outsider = User.objects.create_user(
+            username="ticket-outsider",
+            password="secret",
+            is_staff=False,
+        )
+        self.folder = Folder.objects.create(name="Lab")
+        FolderPermission.objects.create(folder=self.folder, user=self.staff)
+        FolderPermission.objects.create(folder=self.folder, user=self.member)
+        self.visible = ConnectionRdp.objects.create(
+            name="VISIBLE",
+            host="10.0.0.4",
+            parent=self.folder,
+            password="s3cret",
+        )
+        _token, self.staff_secret = create_agent_token(self.staff, "staff-laptop")
+        _token, self.member_secret = create_agent_token(self.member, "member-laptop")
+        _token, self.outsider_secret = create_agent_token(self.outsider, "outsider-laptop")
+
+    def tool(self, name, arguments):
+        return self.tool_as(self.staff, name, arguments)
+
+    def tool_as(self, user, name, arguments):
+        secret = {
+            self.staff.pk: self.staff_secret,
+            self.member.pk: self.member_secret,
+            self.outsider.pk: self.outsider_secret,
+        }[user.pk]
+        response = self.client.post(
+            "/mcp/",
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer " + secret,
+        )
+        self.assertEqual(response.status_code, 200, response.content[:500])
+        body = response.json()
+        self.assertIn("result", body, body)
+        return json.loads(body["result"]["content"][0]["text"])
+
+    def test_staff_can_grant_folder_access(self):
+        FolderPermission.objects.filter(folder=self.folder, user=self.member).delete()
+        self.assertFalse(self.folder.users.filter(pk=self.member.id).exists())
+        payload = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "user_id": self.member.id,
+        })
+        self.assertTrue(payload["ok"])
+        self.assertTrue(self.folder.users.filter(pk=self.member.id).exists())
+        self.assertEqual(
+            FolderPermission.objects.filter(folder=self.folder, user=self.member).count(),
+            1,
+        )
+        again = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "user_id": self.member.id,
+        })
+        self.assertTrue(again["ok"], again)
+        self.assertEqual(
+            FolderPermission.objects.filter(folder=self.folder, user=self.member).count(),
+            1,
+        )
+
+    def test_non_staff_set_folder_access_is_not_allowed(self):
+        before = set(FolderPermission.objects.filter(folder=self.folder).values_list("pk", flat=True))
+        payload = self.tool_as(self.member, "guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "user_id": self.outsider.id,
+        })
+        self.assertEqual(payload["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(payload["error"]["retry"], "never")
+        self.assertFalse(self.folder.users.filter(pk=self.outsider.id).exists())
+        hidden = Folder.objects.create(name="Hidden")
+        missing = self.tool_as(self.member, "guacozy_set_folder_access", {
+            "folder_id": hidden.id, "action": "revoke", "user_id": self.staff.id,
+        })
+        self.assertEqual(missing["error"]["code"], "NOT_ALLOWED")
+        self.assertEqual(missing["error"]["retry"], "never")
+        self.assertEqual(
+            set(FolderPermission.objects.filter(folder=self.folder).values_list("pk", flat=True)),
+            before,
+        )
+
+    def test_folder_access_needs_exactly_one_principal(self):
+        both = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id,
+            "action": "grant",
+            "user_id": self.outsider.id,
+            "group_id": 1,
+        })
+        self.assertEqual(both["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(both["error"]["retry"], "never")
+        self.assertFalse(self.folder.users.filter(pk=self.outsider.id).exists())
+        neither = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "revoke",
+        })
+        self.assertEqual(neither["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(neither["error"]["retry"], "never")
+        self.assertTrue(self.folder.users.filter(pk=self.member.id).exists())
+        bad_action = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "allow", "user_id": self.outsider.id,
+        })
+        self.assertEqual(bad_action["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(bad_action["error"]["retry"], "never")
+
+    def test_staff_can_grant_any_folder_and_revoke(self):
+        hidden = Folder.objects.create(name="Hidden")
+        granted = self.tool("guacozy_set_folder_access", {
+            "folder_id": hidden.id, "action": "grant", "user_id": self.outsider.id,
+        })
+        self.assertTrue(granted["ok"], granted)
+        self.assertTrue(hidden.users.filter(pk=self.outsider.id).exists())
+        self.assertEqual(
+            FolderPermission.objects.filter(folder=hidden, user=self.outsider).count(),
+            1,
+        )
+        revoked = self.tool("guacozy_set_folder_access", {
+            "folder_id": hidden.id, "action": "revoke", "user_id": self.outsider.id,
+        })
+        self.assertTrue(revoked["ok"], revoked)
+        self.assertFalse(hidden.users.filter(pk=self.outsider.id).exists())
+        missing = self.tool("guacozy_set_folder_access", {
+            "folder_id": 999999, "action": "grant", "user_id": self.member.id,
+        })
+        self.assertEqual(missing["error"]["code"], "NOT_FOUND")
+        self.assertEqual(missing["error"]["retry"], "never")
+        unknown_user = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "user_id": 999999,
+        })
+        self.assertEqual(unknown_user["error"]["code"], "NOT_FOUND")
+
+    def test_staff_can_grant_and_revoke_a_group(self):
+        group = Group.objects.create(name="ops")
+        other = Group.objects.create(name="other")
+        FolderPermission.objects.create(folder=self.folder, group=other)
+        granted = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "group_id": group.id,
+        })
+        self.assertTrue(granted["ok"], granted)
+        self.assertTrue(self.folder.groups.filter(pk=group.id).exists())
+        self.assertEqual(
+            FolderPermission.objects.filter(folder=self.folder, group=group).count(),
+            1,
+        )
+        self.assertTrue(self.folder.users.filter(pk=self.member.id).exists())
+        revoked = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "revoke", "group_id": group.id,
+        })
+        self.assertTrue(revoked["ok"], revoked)
+        self.assertFalse(self.folder.groups.filter(pk=group.id).exists())
+        self.assertTrue(self.folder.groups.filter(pk=other.id).exists())
+        self.assertTrue(self.folder.users.filter(pk=self.member.id).exists())
+        unknown = self.tool("guacozy_set_folder_access", {
+            "folder_id": self.folder.id, "action": "grant", "group_id": 999999,
+        })
+        self.assertEqual(unknown["error"]["code"], "NOT_FOUND")
+
+    def test_member_ticket_is_theirs(self):
+        payload = self.tool_as(self.member, "guacozy_create_ticket", {"connection_id": str(self.visible.id)})
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["data"]["connection_id"], str(self.visible.id))
+        ticket = Ticket.objects.get(pk=payload["data"]["id"])
+        self.assertEqual(ticket.user, self.member)
+        self.assertEqual(ticket.author, self.member)
+        self.assertTrue(ticket.control)
+        self.assertIsNone(ticket.parent_id)
+        self.assertEqual(ticket.validityperiod, timedelta(seconds=86400))
+        self.assertEqual(
+            set(payload["data"]),
+            {"id", "connection_id", "control", "parent", "validto"},
+        )
+        self.assertEqual(payload["data"]["id"], str(ticket.id))
+        self.assertEqual(payload["data"]["control"], True)
+        self.assertIsNone(payload["data"]["parent"])
+        self.assertEqual(
+            payload["data"]["validto"],
+            timezone.localtime(ticket.created + ticket.validityperiod).isoformat(),
+        )
+        datetime.fromisoformat(payload["data"]["validto"])
+        second = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertTrue(second["ok"], second)
+        self.assertNotEqual(second["data"]["id"], payload["data"]["id"])
+
+    def test_list_tickets_does_not_delete_other_expired_tickets(self):
+        created = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertTrue(created["ok"], created)
+        parent = Ticket.objects.create(
+            connection=self.visible,
+            user=self.member,
+            author=self.member,
+        )
+        child = Ticket.objects.create(
+            connection=self.visible,
+            user=self.outsider,
+            author=self.member,
+            parent=parent,
+            control=False,
+        )
+        held_expired = Ticket.objects.create(
+            connection=self.visible,
+            user=self.member,
+            author=self.staff,
+            validityperiod=timedelta(seconds=60),
+        )
+        other_folder = Folder.objects.create(name="Elsewhere")
+        other_conn = ConnectionRdp.objects.create(
+            name="OTHER",
+            host="10.1.1.1",
+            parent=other_folder,
+        )
+        other_expired = Ticket.objects.create(
+            connection=other_conn,
+            user=self.outsider,
+            author=self.outsider,
+            validityperiod=timedelta(seconds=60),
+        )
+        expired_at = timezone.now() - timedelta(days=30)
+        Ticket.objects.filter(pk__in=[held_expired.pk, other_expired.pk]).update(created=expired_at)
+
+        outsider_list = self.tool_as(self.outsider, "guacozy_list_tickets", {})
+        self.assertTrue(outsider_list["ok"], outsider_list)
+        self.assertTrue(Ticket.objects.filter(pk=held_expired.pk).exists())
+        self.assertTrue(Ticket.objects.filter(pk=other_expired.pk).exists())
+        outsider_ids = {row["id"] for row in outsider_list["data"]["tickets"]}
+        self.assertIn(str(child.id), outsider_ids)
+        self.assertIn(str(other_expired.id), outsider_ids)
+        self.assertNotIn(str(held_expired.id), outsider_ids)
+        self.assertNotIn(created["data"]["id"], outsider_ids)
+
+        listed = self.tool_as(self.member, "guacozy_list_tickets", {})
+        self.assertTrue(listed["ok"], listed)
+        rows = {row["id"]: row for row in listed["data"]["tickets"]}
+        self.assertIn(created["data"]["id"], rows)
+        self.assertIn(str(parent.id), rows)
+        self.assertIn(str(child.id), rows)
+        self.assertIn(str(held_expired.id), rows)
+        self.assertNotIn(str(other_expired.id), rows)
+        self.assertIsNone(rows[str(parent.id)]["parent"])
+        self.assertEqual(rows[str(child.id)]["parent"], str(parent.id))
+        self.assertEqual(rows[str(child.id)]["control"], False)
+        self.assertEqual(rows[str(child.id)]["connection_id"], str(self.visible.id))
+        self.assertEqual(
+            set(rows[created["data"]["id"]]),
+            {"id", "connection_id", "control", "parent", "validto"},
+        )
+        self.assertTrue(Ticket.objects.filter(pk=other_expired.pk).exists())
+        self.assertTrue(Ticket.objects.filter(pk=held_expired.pk).exists())
+
+        staff_ids = {row["id"] for row in self.tool("guacozy_list_tickets", {})["data"]["tickets"]}
+        self.assertIn(str(held_expired.id), staff_ids)
+        self.assertNotIn(created["data"]["id"], staff_ids)
+        self.assertNotIn(str(other_expired.id), staff_ids)
+
+    def test_delete_ticket_only_author_or_holder(self):
+        created = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertTrue(created["ok"], created)
+        ticket_id = created["data"]["id"]
+        denied = self.tool_as(self.outsider, "guacozy_delete_ticket", {"ticket_id": ticket_id})
+        self.assertEqual(denied["error"]["code"], "NOT_FOUND")
+        self.assertEqual(denied["error"]["retry"], "never")
+        self.assertTrue(Ticket.objects.filter(pk=ticket_id).exists())
+        removed = self.tool_as(self.member, "guacozy_delete_ticket", {"ticket_id": ticket_id})
+        self.assertTrue(removed["ok"], removed)
+        self.assertEqual(removed["data"]["id"], ticket_id)
+        self.assertEqual(removed["data"]["connection_id"], str(self.visible.id))
+        self.assertEqual(
+            set(removed["data"]),
+            {"id", "connection_id", "control", "parent", "validto"},
+        )
+        self.assertFalse(Ticket.objects.filter(pk=ticket_id).exists())
+
+        authored = Ticket.objects.create(
+            connection=self.visible,
+            user=self.outsider,
+            author=self.member,
+        )
+        by_author = self.tool_as(self.member, "guacozy_delete_ticket", {"ticket_id": str(authored.id)})
+        self.assertTrue(by_author["ok"], by_author)
+        self.assertFalse(Ticket.objects.filter(pk=authored.id).exists())
+
+        held = Ticket.objects.create(
+            connection=self.visible,
+            user=self.member,
+            author=self.staff,
+            validityperiod=timedelta(seconds=60),
+        )
+        Ticket.objects.filter(pk=held.pk).update(created=timezone.now() - timedelta(days=30))
+        by_holder = self.tool_as(self.member, "guacozy_delete_ticket", {"ticket_id": str(held.id)})
+        self.assertTrue(by_holder["ok"], by_holder)
+        self.assertFalse(Ticket.objects.filter(pk=held.id).exists())
+        malformed = self.tool("guacozy_delete_ticket", {"ticket_id": "not-a-uuid"})
+        self.assertEqual(malformed["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(malformed["error"]["retry"], "never")
+
+    def test_hidden_connection_ticket_is_not_found(self):
+        visible = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertTrue(visible["ok"], visible)
+        payload = self.tool_as(self.outsider, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+        })
+        self.assertEqual(payload["error"]["code"], "NOT_FOUND")
+        self.assertEqual(payload["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.filter(user=self.outsider).exists())
+        hidden_folder = Folder.objects.create(name="Hidden")
+        hidden = ConnectionRdp.objects.create(
+            name="HIDDEN",
+            host="10.9.9.9",
+            parent=hidden_folder,
+        )
+        staff_hidden = self.tool("guacozy_create_ticket", {"connection_id": str(hidden.id)})
+        self.assertEqual(staff_hidden["error"]["code"], "NOT_FOUND")
+        self.assertFalse(Ticket.objects.filter(connection=hidden).exists())
+
+    def test_create_ticket_validity_seconds(self):
+        bad = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+            "validity_seconds": True,
+        })
+        self.assertEqual(bad["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(bad["error"]["retry"], "never")
+        negative = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+            "validity_seconds": -1,
+        })
+        self.assertEqual(negative["error"]["code"], "INVALID_ARGS")
+        self.assertFalse(Ticket.objects.filter(user=self.member).exists())
+        payload = self.tool_as(self.member, "guacozy_create_ticket", {
+            "connection_id": str(self.visible.id),
+            "validity_seconds": 120,
+        })
+        self.assertTrue(payload["ok"], payload)
+        ticket = Ticket.objects.get(pk=payload["data"]["id"])
+        self.assertEqual(ticket.validityperiod, timedelta(seconds=120))
+        self.assertEqual(ticket.user, self.member)
+        self.assertEqual(ticket.author, self.member)
+        self.assertTrue(ticket.control)
+        self.assertIsNone(ticket.parent_id)
+        self.assertEqual(
+            payload["data"]["validto"],
+            timezone.localtime(ticket.created + ticket.validityperiod).isoformat(),
         )
