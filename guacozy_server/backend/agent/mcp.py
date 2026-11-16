@@ -4,6 +4,7 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from backend.agent.desktop import DESKTOP_TOOLS
 from backend.agent.errors import fail, ok
 from backend.agent.management import ACCESS_TOOLS, MANAGEMENT_TOOLS
 from backend.agent.tokens import authenticate_bearer
@@ -33,6 +34,7 @@ TOOLS = {
     },
     **MANAGEMENT_TOOLS,
     **ACCESS_TOOLS,
+    **DESKTOP_TOOLS,
 }
 
 

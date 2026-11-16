@@ -1,11 +1,19 @@
 import base64
 import io
 import json
+import logging
+import socket
+import struct
+import threading
+import time
+import uuid
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth.models import Group
 from django.test import Client, SimpleTestCase, TestCase
 from django.utils import timezone
+from guacamole.client import GuacamoleClient
 from guacamole.instruction import GuacamoleInstruction
 from PIL import Image
 
@@ -18,7 +26,9 @@ from backend.models import (
     ConnectionVnc,
     Folder,
     FolderPermission,
+    GuacdServer,
     Ticket,
+    TicketLog,
 )
 from users.models import User
 
@@ -138,6 +148,15 @@ class AgentMcpTests(TestCase):
                 "guacozy_list_tickets",
                 "guacozy_create_ticket",
                 "guacozy_delete_ticket",
+                "guacozy_open_desktop",
+                "guacozy_snapshot",
+                "guacozy_click",
+                "guacozy_type",
+                "guacozy_press",
+                "guacozy_scroll",
+                "guacozy_clipboard_get",
+                "guacozy_clipboard_set",
+                "guacozy_close_desktop",
             ],
         )
 
@@ -1023,3 +1042,705 @@ class FrameTests(SimpleTestCase):
         self.assertEqual(image.getpixel((0, 0)), (255, 0, 0, 128))
         self.assertEqual(image.getpixel((1, 0)), (128, 127, 0, 255))
         self.assertEqual(image.getpixel((2, 0)), (0, 255, 0, 255))
+
+
+def _closed_local_port():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+class _FakeGuacd:
+    """Local guacd. Reads until connect, so a join is not required to send size."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.sent = []
+        self.server_args = ()
+        self.mouse_seen = threading.Event()
+        self.agent = None
+        self.agent_id = None
+        self._stop = False
+        self._lock = threading.Lock()
+        self._threads = []
+        self._clients = []
+        self._ready = threading.Event()
+        self.thread = threading.Thread(target=self._accept, daemon=True)
+        self.thread.start()
+        if not self._ready.wait(2):
+            raise RuntimeError("fake guacd did not start")
+
+    def sent_copy(self):
+        with self._lock:
+            return list(self.sent)
+
+    @property
+    def opcodes(self):
+        return [opcode for opcode, _args in self.sent_copy()]
+
+    def send_to_agent(self, instructions):
+        payload = "".join(item.encode() for item in instructions).encode()
+        with self._lock:
+            sock = self.agent
+        if sock is None:
+            raise RuntimeError("agent socket is not connected")
+        sock.sendall(payload)
+
+    def stop(self):
+        self._stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        with self._lock:
+            clients = [thread_conn for thread_conn in self._clients]
+        for conn in clients:
+            self._reset(conn)
+        self.thread.join(timeout=2)
+        for worker in list(self._threads):
+            worker.join(timeout=2)
+
+    def _reset(self, conn):
+        # RST, so a later send on the agent socket fails instead of succeeding after FIN.
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    def _accept(self):
+        self.sock.settimeout(0.2)
+        self._ready.set()
+        while not self._stop:
+            try:
+                conn, _addr = self.sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with self._lock:
+                self._clients.append(conn)
+            worker = threading.Thread(target=self._client, args=(conn,), daemon=True)
+            self._threads.append(worker)
+            worker.start()
+
+    def _record(self, instruction):
+        with self._lock:
+            self.sent.append((instruction.opcode, list(instruction.args)))
+        if instruction.opcode == "mouse":
+            self.mouse_seen.set()
+
+    def _pull(self, conn, buf, timeout):
+        conn.settimeout(timeout)
+        while b";" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return None, buf
+            buf += chunk
+        raw, buf = buf.split(b";", 1)
+        return GuacamoleInstruction.load(raw.decode() + ";"), buf
+
+    def _client(self, conn):
+        buf = b""
+        try:
+            select, buf = self._pull(conn, buf, 5)
+            if select is None:
+                return
+            self._record(select)
+            args = tuple(self.server_args)
+            conn.sendall(GuacamoleInstruction("args", *args).encode().encode())
+            while True:
+                instruction, buf = self._pull(conn, buf, 5)
+                if instruction is None:
+                    return
+                self._record(instruction)
+                if instruction.opcode == "connect":
+                    break
+            ready_id = "$" + str(uuid.uuid4())
+            with self._lock:
+                if self.agent is None:
+                    self.agent = conn
+                    self.agent_id = ready_id
+            conn.sendall(GuacamoleInstruction("ready", ready_id).encode().encode())
+            while not self._stop:
+                try:
+                    instruction, buf = self._pull(conn, buf, 0.2)
+                except TimeoutError:
+                    continue
+                if instruction is None:
+                    return
+                self._record(instruction)
+        except OSError:
+            return
+
+
+class _OtherJoin:
+    """A second guacd client blocked in read. Closing the agent must not close it."""
+
+    def __init__(self, port, connection_id):
+        self.alive = False
+        self._stop = False
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.sock.sendall(GuacamoleInstruction("select", connection_id).encode().encode())
+        self._read_one()
+        payload = "".join(
+            GuacamoleInstruction(opcode, *args).encode()
+            for opcode, args in (
+                ("audio", ()),
+                ("video", ()),
+                ("image", ("image/png",)),
+                ("connect", ()),
+            )
+        )
+        self.sock.sendall(payload.encode())
+        self._read_one()
+        self.alive = True
+        self.sock.settimeout(0.2)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _read_one(self):
+        self.sock.settimeout(5)
+        data = b""
+        while b";" not in data:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise OSError("closed during handshake")
+            data += chunk
+
+    def _loop(self):
+        try:
+            while not self._stop:
+                try:
+                    chunk = self.sock.recv(4096)
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    self.alive = False
+                    return
+        except OSError:
+            self.alive = False
+
+    def close(self):
+        self._stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=2)
+
+
+class AgentDesktopTests(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.other_join = None
+        self.session_id = None
+        original_init = GuacamoleClient.__init__
+
+        def fast_timeout(client, host, port, timeout=20, debug=False, logger=None):
+            # Same 0.4s budget as the tunnel test. A shared receive thread stays
+            # blocked after relax_read_timeout and the click below misses the 2s wait.
+            original_init(client, host, port, timeout=0.4, debug=debug, logger=logger)
+
+        self._timeout_patch = patch.object(GuacamoleClient, "__init__", fast_timeout)
+        self._timeout_patch.start()
+        self.addCleanup(self._timeout_patch.stop)
+        self.fake = _FakeGuacd()
+        self.staff = User.objects.create_user(
+            username="desktop-staff",
+            password="secret",
+            is_staff=True,
+        )
+        self.member = User.objects.create_user(
+            username="desktop-member",
+            password="secret",
+            is_staff=False,
+        )
+        self.outsider = User.objects.create_user(
+            username="desktop-outsider",
+            password="secret",
+            is_staff=False,
+        )
+        self.folder = Folder.objects.create(name="Desktop lab")
+        FolderPermission.objects.create(folder=self.folder, user=self.member)
+        FolderPermission.objects.create(folder=self.folder, user=self.staff)
+        self.guacd = GuacdServer.objects.create(
+            name="desktop-guacd",
+            hostname="127.0.0.1",
+            port=self.fake.port,
+        )
+        self.connection = ConnectionSsh.objects.create(
+            name="DESKTOP",
+            host="10.0.0.8",
+            parent=self.folder,
+            password="s3cret",
+            guacdserver=self.guacd,
+        )
+        self.ticket = Ticket.objects.create(
+            connection=self.connection,
+            user=self.member,
+            author=self.member,
+        )
+        _token, self.staff_secret = create_agent_token(self.staff, "staff-desktop")
+        _token, self.member_secret = create_agent_token(self.member, "member-desktop")
+        _token, self.outsider_secret = create_agent_token(self.outsider, "outsider-desktop")
+
+    def tearDown(self):
+        try:
+            self._close_sessions()
+        finally:
+            try:
+                if self.other_join is not None:
+                    self.other_join.close()
+            finally:
+                self.fake.stop()
+        super().tearDown()
+
+    def _close_sessions(self):
+        try:
+            from backend.agent import desktop as desktop_module
+        except ImportError:
+            return
+        sessions = getattr(desktop_module, "_SESSIONS", None)
+        lock = getattr(desktop_module, "_SESSIONS_LOCK", None)
+        if sessions is None or lock is None:
+            return
+        with lock:
+            running = list(sessions.values())
+            sessions.clear()
+        for session in running:
+            session.shutdown()
+
+    def tool(self, name, arguments):
+        return self.tool_as(self.member, name, arguments)
+
+    def tool_as(self, user, name, arguments):
+        secret = {
+            self.staff.pk: self.staff_secret,
+            self.member.pk: self.member_secret,
+            self.outsider.pk: self.outsider_secret,
+        }[user.pk]
+        response = self.client.post(
+            "/mcp/",
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer " + secret,
+        )
+        self.assertEqual(response.status_code, 200, response.content[:500])
+        body = response.json()
+        self.assertIn("result", body, body)
+        return json.loads(body["result"]["content"][0]["text"])
+
+    def _open(self, **arguments):
+        if not arguments:
+            arguments = {"ticket_id": str(self.ticket.id)}
+        payload = self.tool("guacozy_open_desktop", arguments)
+        self.assertTrue(payload["ok"], payload)
+        self.session_id = payload["data"]["session_id"]
+        return payload
+
+    def _wait_sent(self, predicate, timeout=2):
+        deadline = time.monotonic() + timeout
+        while True:
+            snapshot = self.fake.sent_copy()
+            if predicate(snapshot):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+
+    def test_open_new_snapshot_pixels(self):
+        self.assertFalse(self.member.is_staff)
+        payload = self._open(connection_id=str(self.connection.id))
+        self.assertFalse(payload["data"]["joined"])
+        self.assertEqual(payload["data"]["width"], 1280)
+        self.assertEqual(payload["data"]["height"], 720)
+        self.assertEqual(
+            set(payload["data"]),
+            {"session_id", "ticket_id", "width", "height", "joined"},
+        )
+        ticket = Ticket.objects.get(pk=payload["data"]["ticket_id"])
+        self.assertNotEqual(ticket.id, self.ticket.id)
+        self.assertEqual(ticket.user, self.member)
+        self.assertEqual(ticket.author, self.member)
+        self.assertTrue(ticket.control)
+        self.assertIsNone(ticket.parent_id)
+        self.assertEqual(ticket.validityperiod, timedelta(days=1))
+        self.assertEqual(self.fake.agent_id, "$" + str(ticket.sessionid))
+        log = TicketLog.objects.get(ticketid=ticket.id)
+        self.assertEqual(log.action, "connect")
+        self.assertIsNone(log.ip)
+        sent = self.fake.sent_copy()
+        self.assertEqual([opcode for opcode, _args in sent][0], "select")
+        self.assertEqual(
+            [args for opcode, args in sent if opcode == "select"],
+            [["ssh"]],
+        )
+        self.assertEqual(
+            [opcode for opcode, _args in sent if opcode != "select"],
+            ["size", "audio", "video", "image", "connect"],
+        )
+        self.assertEqual(
+            [args for opcode, args in sent if opcode == "size"],
+            [["1280", "720", "96"]],
+        )
+        # 1x1 red PNG at x=1, y=0, then sync timestamp 1. Size must precede the paste.
+        self.fake.send_to_agent([
+            GuacamoleInstruction("size", "0", "2", "2"),
+            GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"),
+            GuacamoleInstruction("blob", "3", RED_PNG_B64),
+            GuacamoleInstruction("end", "3"),
+            GuacamoleInstruction("sync", "1"),
+        ])
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertTrue(snap["ok"], snap)
+        self.assertEqual(
+            snap["data"]["note"],
+            "Pixels, origin top left. There are no element refs.",
+        )
+        self.assertEqual(
+            set(snap["data"]),
+            {"session_id", "width", "height", "png_base64", "cursor", "note"},
+        )
+        self.assertEqual(snap["data"]["session_id"], self.session_id)
+        self.assertEqual(snap["data"]["width"], 2)
+        self.assertEqual(snap["data"]["height"], 2)
+        self.assertEqual(snap["data"]["cursor"], {"x": 0, "y": 0})
+        image = Image.open(io.BytesIO(base64.b64decode(snap["data"]["png_base64"])))
+        self.assertEqual(image.getpixel((1, 0))[:3], (255, 0, 0))
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertTrue(self._wait_sent(
+            lambda rows: ["1"] in [args for opcode, args in rows if opcode == "sync"],
+        ))
+        syncs = [args for opcode, args in self.fake.sent if opcode == "sync"]
+        self.assertIn(["1"], syncs)
+
+    def test_join_does_not_send_size(self):
+        existing = uuid.uuid4()
+        self.ticket.sessionid = existing
+        self.ticket.save()
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["data"]["joined"])
+        self.assertEqual(payload["data"]["width"], 0)
+        self.assertEqual(payload["data"]["height"], 0)
+        self.assertEqual(payload["data"]["ticket_id"], str(self.ticket.id))
+        self.assertNotIn("size", self.fake.opcodes)
+        self.assertEqual(
+            [opcode for opcode, _args in self.fake.sent_copy() if opcode != "select"],
+            ["audio", "video", "image", "connect"],
+        )
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [["$" + str(existing)]],
+        )
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.sessionid, existing)
+
+    def test_child_ticket_joins_the_parent_session(self):
+        existing = uuid.uuid4()
+        self.ticket.sessionid = existing
+        self.ticket.save()
+        child = Ticket.objects.create(
+            connection=self.connection,
+            user=self.outsider,
+            author=self.member,
+            parent=self.ticket,
+            control=False,
+        )
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(child.id)})
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["data"]["joined"])
+        self.assertNotIn("size", self.fake.opcodes)
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [["$" + str(existing)]],
+        )
+        child.refresh_from_db()
+        self.ticket.refresh_from_db()
+        self.assertIsNone(child.sessionid)
+        self.assertEqual(self.ticket.sessionid, existing)
+
+    def test_new_session_is_stored_on_the_parent_ticket(self):
+        child = Ticket.objects.create(
+            connection=self.connection,
+            user=self.member,
+            author=self.member,
+            parent=self.ticket,
+        )
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(child.id)})
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["data"]["joined"])
+        self.assertEqual(payload["data"]["width"], 1280)
+        self.assertEqual(payload["data"]["height"], 720)
+        self.assertIn("size", self.fake.opcodes)
+        child.refresh_from_db()
+        self.ticket.refresh_from_db()
+        self.assertIsNone(child.sessionid)
+        self.assertEqual(self.fake.agent_id, "$" + str(self.ticket.sessionid))
+
+    def test_second_open_joins_the_stored_session(self):
+        first = self._open()
+        self.assertFalse(first["data"]["joined"])
+        self.ticket.refresh_from_db()
+        stored = self.ticket.sessionid
+        before = len(self.fake.sent_copy())
+        second = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertTrue(second["ok"], second)
+        self.assertTrue(second["data"]["joined"])
+        new_ops = [opcode for opcode, _args in self.fake.sent_copy()[before:]]
+        self.assertNotIn("size", new_ops)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.sessionid, stored)
+
+    def test_new_session_uses_connection_parameters_without_logging_them(self):
+        self.fake.server_args = ("hostname", "password", "font-size")
+        with self.assertLogs("backend.agent", level="DEBUG") as captured:
+            self._open()
+            logging.getLogger("backend.agent").info("parameters checked")
+        self.assertNotIn("s3cret", "\n".join(captured.output))
+        connect = [args for opcode, args in self.fake.sent_copy() if opcode == "connect"]
+        self.assertEqual(connect, [["10.0.0.8", "s3cret", "8"]])
+
+    def test_press_releases_key(self):
+        self._open()
+        self.tool("guacozy_press", {"session_id": self.session_id, "key": "Shift"})
+        self.assertTrue(self._wait_sent(
+            lambda rows: [args for opcode, args in rows if opcode == "key"] == [["65505", "1"], ["65505", "0"]],
+        ))
+        keys = [args for opcode, args in self.fake.sent if opcode == "key"]
+        self.assertEqual(keys, [["65505", "1"], ["65505", "0"]])
+
+    def test_type_scroll_and_buttons(self):
+        self._open()
+        self.assertTrue(self.tool("guacozy_type", {
+            "session_id": self.session_id,
+            "text": "A1",
+        })["ok"])
+        self.assertTrue(self._wait_sent(
+            lambda rows: [args for opcode, args in rows if opcode == "key"] == [
+                ["65", "1"], ["65", "0"], ["49", "1"], ["49", "0"],
+            ],
+        ))
+        before = len(self.fake.sent_copy())
+        self.assertTrue(self.tool("guacozy_click", {
+            "session_id": self.session_id,
+            "x": 3,
+            "y": 4,
+            "button": "right",
+            "count": 2,
+        })["ok"])
+        self.assertTrue(self._wait_sent(lambda rows: len(rows) >= before + 4))
+        mice = [args for opcode, args in self.fake.sent_copy()[before:] if opcode == "mouse"]
+        self.assertEqual(mice, [["3", "4", "4"], ["3", "4", "0"], ["3", "4", "4"], ["3", "4", "0"]])
+        before = len(self.fake.sent_copy())
+        self.assertTrue(self.tool("guacozy_scroll", {
+            "session_id": self.session_id,
+            "x": 5,
+            "y": 6,
+            "delta": 6,
+        })["ok"])
+        self.assertTrue(self._wait_sent(lambda rows: len(rows) >= before + 10))
+        ups = [args for opcode, args in self.fake.sent_copy()[before:] if opcode == "mouse"]
+        self.assertEqual(ups, [["5", "6", "8"], ["5", "6", "0"]] * 5)
+        before = len(self.fake.sent_copy())
+        self.assertTrue(self.tool("guacozy_scroll", {
+            "session_id": self.session_id,
+            "x": 5,
+            "y": 6,
+            "delta": -2,
+        })["ok"])
+        self.assertTrue(self._wait_sent(lambda rows: len(rows) >= before + 4))
+        downs = [args for opcode, args in self.fake.sent_copy()[before:] if opcode == "mouse"]
+        self.assertEqual(downs, [["5", "6", "16"], ["5", "6", "0"]] * 2)
+        bad = self.tool("guacozy_press", {"session_id": self.session_id, "key": "F1"})
+        self.assertEqual(bad["error"]["code"], "INVALID_ARGS")
+        self.assertEqual(bad["error"]["retry"], "never")
+
+    def test_click_survives_a_quiet_socket(self):
+        # receive is blocked in the poller; click must still arrive within 2s
+        self._open()
+        started = time.monotonic()
+        self.tool("guacozy_click", {
+            "session_id": self.session_id,
+            "x": 10,
+            "y": 20,
+            "button": "left",
+        })
+        self.assertTrue(self.fake.mouse_seen.wait(2))
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(self._wait_sent(
+            lambda rows: [args for opcode, args in rows if opcode == "mouse"] == [
+                ["10", "20", "1"], ["10", "20", "0"],
+            ],
+        ))
+        mice = [args for opcode, args in self.fake.sent if opcode == "mouse"]
+        self.assertEqual(mice, [["10", "20", "1"], ["10", "20", "0"]])
+
+    def test_click_failure_retry_is_unsafe(self):
+        self._open()
+        self.fake.stop()
+        payload = self.tool("guacozy_click", {"session_id": self.session_id, "x": 1, "y": 1})
+        self.assertEqual(payload["error"]["code"], "STALE_SESSION")
+        self.assertEqual(payload["error"]["retry"], "unsafe")
+
+    def test_dead_socket_retry_flags(self):
+        self._open()
+        self.fake.stop()
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertEqual(snap["error"]["code"], "STALE_SESSION")
+        self.assertEqual(snap["error"]["retry"], "safe")
+        calls = (
+            ("guacozy_type", {"session_id": self.session_id, "text": "a"}),
+            ("guacozy_press", {"session_id": self.session_id, "key": "Enter"}),
+            ("guacozy_scroll", {"session_id": self.session_id, "x": 1, "y": 1, "delta": 1}),
+            ("guacozy_clipboard_get", {"session_id": self.session_id}),
+            ("guacozy_clipboard_set", {"session_id": self.session_id, "text": "x"}),
+        )
+        for name, arguments in calls:
+            payload = self.tool(name, arguments)
+            self.assertEqual(payload["error"]["code"], "STALE_SESSION", name)
+            self.assertEqual(payload["error"]["retry"], "unsafe", name)
+
+    def test_clipboard_secret_is_not_logged(self):
+        self._open()
+        with self.assertLogs("backend.agent", level="DEBUG") as captured:
+            payload = self.tool("guacozy_clipboard_set", {
+                "session_id": self.session_id,
+                "text": "clipboard-secret",
+            })
+            logging.getLogger("backend.agent").info("clipboard checked")
+        self.assertTrue(payload["ok"], payload)
+        logged = "\n".join(captured.output)
+        self.assertNotIn("clipboard-secret", logged)
+        secret = base64.b64encode(b"clipboard-secret").decode("ascii")
+        self.assertNotIn(secret, logged)
+        self.assertTrue(self._wait_sent(
+            lambda rows: [opcode for opcode, _args in rows if opcode in {"clipboard", "blob", "end"}] == [
+                "clipboard", "blob", "end",
+            ],
+        ))
+        ops = [
+            (opcode, args)
+            for opcode, args in self.fake.sent
+            if opcode in {"clipboard", "blob", "end"}
+        ]
+        self.assertEqual(len(ops), 3)
+        stream = ops[0][1][0]
+        self.assertEqual(ops[0][1], [stream, "text/plain"])
+        self.assertEqual(ops[1], ("blob", [stream, secret]))
+        self.assertEqual(ops[2], ("end", [stream]))
+        got = self.tool("guacozy_clipboard_get", {"session_id": self.session_id})
+        self.assertEqual(got["data"], {"text": "clipboard-secret"})
+        empty = self.tool("guacozy_clipboard_get", {"session_id": self.session_id})
+        self.assertEqual(empty["data"]["text"], "clipboard-secret")
+
+    def test_other_user_session_is_not_found(self):
+        self._open()
+        for name, arguments in (
+            ("guacozy_snapshot", {"session_id": self.session_id}),
+            ("guacozy_click", {"session_id": self.session_id, "x": 1, "y": 1}),
+            ("guacozy_close_desktop", {"session_id": self.session_id}),
+        ):
+            payload = self.tool_as(self.outsider, name, arguments)
+            self.assertEqual(payload["error"]["code"], "NOT_FOUND", name)
+            self.assertEqual(payload["error"]["retry"], "never", name)
+        missing = self.tool("guacozy_snapshot", {"session_id": str(uuid.uuid4())})
+        self.assertEqual(missing["error"]["code"], "NOT_FOUND")
+        self.assertEqual(missing["error"]["retry"], "never")
+        self.assertTrue(self.tool("guacozy_press", {
+            "session_id": self.session_id,
+            "key": "a",
+        })["ok"])
+
+    def test_close_leaves_the_other_join_open(self):
+        # second fake client joined with the same connection id and is still reading
+        self._open()
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.fake.agent_id, "$" + str(self.ticket.sessionid))
+        self.other_join = _OtherJoin(self.fake.port, self.fake.agent_id)
+        self.tool("guacozy_close_desktop", {"session_id": self.session_id})
+        self.assertTrue(self.other_join.alive)
+        time.sleep(0.2)
+        self.assertTrue(self.other_join.alive)
+        self.ticket.refresh_from_db()
+        self.assertIsNotNone(self.ticket.sessionid)
+        missing = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertEqual(missing["error"]["code"], "NOT_FOUND")
+        self.assertEqual(missing["error"]["retry"], "never")
+
+    def test_hidden_connection_is_not_found_for_staff(self):
+        hidden_folder = Folder.objects.create(name="Hidden desktop")
+        hidden = ConnectionSsh.objects.create(
+            name="HIDDEN-DESK",
+            host="10.9.9.9",
+            parent=hidden_folder,
+            guacdserver=self.guacd,
+        )
+        for user in (self.member, self.staff):
+            payload = self.tool_as(user, "guacozy_open_desktop", {"connection_id": str(hidden.id)})
+            self.assertEqual(payload["error"]["code"], "NOT_FOUND")
+            self.assertEqual(payload["error"]["message"], "Connection not found.")
+            self.assertEqual(payload["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.filter(connection=hidden).exists())
+
+    def test_open_needs_exactly_one_target(self):
+        neither = self.tool("guacozy_open_desktop", {})
+        both = self.tool("guacozy_open_desktop", {
+            "connection_id": str(self.connection.id),
+            "ticket_id": str(self.ticket.id),
+        })
+        extra = self.tool("guacozy_open_desktop", {
+            "ticket_id": str(self.ticket.id),
+            "width": 1,
+        })
+        for payload in (neither, both, extra):
+            self.assertEqual(payload["error"]["code"], "INVALID_ARGS")
+            self.assertEqual(payload["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.exclude(pk=self.ticket.id).exists())
+        self.assertIsNone(self.ticket.sessionid)
+
+    def test_stranger_cannot_open_a_ticket_staff_does_not_own(self):
+        shared = Ticket.objects.create(
+            connection=self.connection,
+            user=self.outsider,
+            author=self.member,
+        )
+        denied = self.tool_as(self.staff, "guacozy_open_desktop", {"ticket_id": str(shared.id)})
+        self.assertEqual(denied["error"]["code"], "NOT_FOUND")
+        self.assertEqual(denied["error"]["retry"], "never")
+        opened = self.tool_as(self.outsider, "guacozy_open_desktop", {"ticket_id": str(shared.id)})
+        self.assertTrue(opened["ok"], opened)
+        self.assertFalse(opened["data"]["joined"])
+
+    def test_handshake_failure_is_remote_desktop(self):
+        self.guacd.port = _closed_local_port()
+        self.guacd.save(update_fields=["port"])
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertEqual(payload["error"]["code"], "REMOTE_DESKTOP")
+        self.assertEqual(payload["error"]["retry"], "unsafe")
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.sessionid)
+
+    def test_expired_ticket_is_not_found(self):
+        self.ticket.created = timezone.now() - timedelta(days=2)
+        self.ticket.validityperiod = timedelta(days=1)
+        self.ticket.save(update_fields=["created", "validityperiod"])
+        payload = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
+        self.assertEqual(payload["error"]["code"], "NOT_FOUND")
+        self.assertEqual(payload["error"]["retry"], "never")
+        self.assertFalse(Ticket.objects.filter(pk=self.ticket.id).exists())
