@@ -5,14 +5,15 @@ import rules
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError, ParseError
 from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.response import Response
 from rules.contrib.rest_framework import AutoPermissionViewSetMixin
 
+from backend.agent.tokens import create_agent_token
 from backend.api.utils import user_allowed_folders, folder_to_object, user_allowed_folders_ids
-from backend.models import Folder, Ticket, Connection, TicketLog
+from backend.models import AgentToken, Folder, Ticket, Connection, TicketLog
 from users.models import User
 from .serializers import UserSerializer, FolderFlatSerializer, TicketSerializer, TicketReadSerializer, \
     ConnectionSerializer, UserShortSerializer
@@ -325,3 +326,55 @@ class TicketViewSet(viewsets.ModelViewSet):
             return TicketReadSerializer
 
         return TicketSerializer
+
+
+def _agent_token_public(token):
+    return {
+        "id": token.id,
+        "name": token.name,
+        "created": token.created,
+        "last_used_at": token.last_used_at,
+        "revoked_at": token.revoked_at,
+    }
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def agent_tokens_view(request):
+    if request.method == "GET":
+        tokens = AgentToken.objects.filter(user=request.user).order_by("created", "id")
+        return Response([_agent_token_public(token) for token in tokens])
+
+    name = request.data.get("name") if hasattr(request.data, "get") else None
+    if isinstance(name, str):
+        name = name.strip()
+    if not isinstance(name, str) or not name:
+        raise ValidationError({"name": ["This field is required."]})
+    if len(name) > 60:
+        raise ValidationError({
+            "name": ["Ensure this field has no more than 60 characters."],
+        })
+
+    token, secret = create_agent_token(request.user, name)
+    return Response(
+        {
+            "id": token.id,
+            "name": token.name,
+            "token": secret,
+            "created": token.created,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def revoke_agent_token_view(request, token_id):
+    try:
+        token = AgentToken.objects.get(pk=token_id, user=request.user)
+    except AgentToken.DoesNotExist:
+        raise NotFound(detail="Token not found")
+    if token.revoked_at is None:
+        token.revoked_at = timezone.now()
+        token.save(update_fields=["revoked_at"])
+    return Response(_agent_token_public(token))

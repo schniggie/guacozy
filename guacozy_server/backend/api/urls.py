@@ -29,4 +29,8 @@ urlpatterns = [
     # this uses same guacd session, so it means "screen sharing"
     path('tickets/share/<uuid:uuid>/', views.share_ticket_view),
 
+    # Raw secret is returned only by POST. List and revoke stay on the owner's rows.
+    path('agent-tokens/', views.agent_tokens_view),
+    path('agent-tokens/<uuid:token_id>/revoke/', views.revoke_agent_token_view),
+
 ]
