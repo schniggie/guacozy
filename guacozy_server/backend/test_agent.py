@@ -1084,6 +1084,36 @@ class FrameTests(SimpleTestCase):
         self.assertEqual(image.getpixel((1, 0)), (128, 127, 0, 255))
         self.assertEqual(image.getpixel((2, 0)), (0, 255, 0, 255))
 
+    def test_offscreen_buffer_keeps_pixels_for_a_later_copy(self):
+        # guacd never sends size for the previous-frame buffer. It copies the
+        # visible layer into that buffer after each frame, then copies matching
+        # cells back on the next frame. A 0x0 buffer would drop both copies.
+        frame = Frame()
+        frame.apply(GuacamoleInstruction("size", "0", "2", "1"))
+        frame.apply(GuacamoleInstruction("img", "3", "14", "0", "image/png", "0", "0"))
+        frame.apply(GuacamoleInstruction("blob", "3", RED_PNG_B64))
+        frame.apply(GuacamoleInstruction("end", "3"))
+        frame.apply(GuacamoleInstruction("copy", "0", "0", "0", "1", "1", "14", "-1", "0", "0"))
+        frame.apply(GuacamoleInstruction("copy", "-1", "0", "0", "1", "1", "14", "0", "1", "0"))
+        image = Image.open(io.BytesIO(frame.png_bytes()))
+        self.assertEqual(image.size, (2, 1))
+        self.assertEqual(image.getpixel((1, 0))[:3], (255, 0, 0))
+
+    def test_jpeg_blob_is_pasted(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(buffer, format="JPEG")
+        blob = base64.b64encode(buffer.getvalue()).decode("ascii")
+        frame = Frame()
+        frame.apply(GuacamoleInstruction("size", "0", "8", "8"))
+        frame.apply(GuacamoleInstruction("img", "1", "0", "0", "image/jpeg", "0", "0"))
+        frame.apply(GuacamoleInstruction("blob", "1", blob))
+        frame.apply(GuacamoleInstruction("end", "1"))
+        image = Image.open(io.BytesIO(frame.png_bytes()))
+        red, green, blue = image.getpixel((4, 4))[:3]
+        self.assertGreater(red, 200)
+        self.assertLess(green, 40)
+        self.assertLess(blue, 40)
+
 
 def _closed_local_port():
     probe = socket.socket()
@@ -1094,7 +1124,7 @@ def _closed_local_port():
 
 
 class _FakeGuacd:
-    """Local guacd. Reads until connect, so a join is not required to send size."""
+    """Local guacd. Reads until connect, then records later instructions."""
 
     def __init__(self):
         self.sock = socket.socket()
@@ -1500,7 +1530,10 @@ class AgentDesktopTests(TestCase):
         syncs = [args for opcode, args in self.fake.sent if opcode == "sync"]
         self.assertIn(["1"], syncs)
 
-    def test_join_does_not_send_size(self):
+    def test_join_sends_size_and_echoes_version(self):
+        # guacd prepends a protocol token. A join must answer it and send size
+        # during the handshake, or the joiner is never shown the current screen.
+        self.fake.server_args = ("VERSION_1_5_0", "hostname")
         existing = uuid.uuid4()
         self.ticket.sessionid = existing
         self.ticket.save()
@@ -1510,17 +1543,35 @@ class AgentDesktopTests(TestCase):
         self.assertEqual(payload["data"]["width"], 0)
         self.assertEqual(payload["data"]["height"], 0)
         self.assertEqual(payload["data"]["ticket_id"], str(self.ticket.id))
-        self.assertNotIn("size", self.fake.opcodes)
+        sent = self.fake.sent_copy()
         self.assertEqual(
-            [opcode for opcode, _args in self.fake.sent_copy() if opcode != "select"],
-            ["audio", "video", "image", "connect"],
+            [opcode for opcode, _args in sent if opcode != "select"],
+            ["size", "audio", "video", "image", "connect"],
         )
         self.assertEqual(
-            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [args for opcode, args in sent if opcode == "size"],
+            [["1280", "720", "96"]],
+        )
+        self.assertEqual(
+            [args for opcode, args in sent if opcode == "image"],
+            [["image/png", "image/jpeg"]],
+        )
+        self.assertEqual(
+            [args for opcode, args in sent if opcode == "connect"],
+            [["VERSION_1_5_0", ""]],
+        )
+        self.assertEqual(
+            [args for opcode, args in sent if opcode == "select"],
             [["$" + str(existing)]],
         )
         self.ticket.refresh_from_db()
         self.assertEqual(self.ticket.sessionid, existing)
+
+    def test_protocol_version_is_capped(self):
+        self.fake.server_args = ("VERSION_1_6_0", "hostname", "password")
+        self._open()
+        connect = [args for opcode, args in self.fake.sent_copy() if opcode == "connect"]
+        self.assertEqual(connect, [["VERSION_1_5_0", "10.0.0.8", "s3cret"]])
 
     def test_dead_join_opens_a_new_session(self):
         dead = uuid.uuid4()
@@ -1567,7 +1618,10 @@ class AgentDesktopTests(TestCase):
         payload = self.tool("guacozy_open_desktop", {"ticket_id": str(child.id)})
         self.assertTrue(payload["ok"], payload)
         self.assertTrue(payload["data"]["joined"])
-        self.assertNotIn("size", self.fake.opcodes)
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "size"],
+            [["1280", "720", "96"]],
+        )
         self.assertEqual(
             [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
             [["$" + str(existing)]],
@@ -1604,10 +1658,83 @@ class AgentDesktopTests(TestCase):
         second = self.tool("guacozy_open_desktop", {"ticket_id": str(self.ticket.id)})
         self.assertTrue(second["ok"], second)
         self.assertTrue(second["data"]["joined"])
-        new_ops = [opcode for opcode, _args in self.fake.sent_copy()[before:]]
-        self.assertNotIn("size", new_ops)
+        new_rows = self.fake.sent_copy()[before:]
+        self.assertEqual(
+            [args for opcode, args in new_rows if opcode == "size"],
+            [["1280", "720", "96"]],
+        )
         self.ticket.refresh_from_db()
         self.assertEqual(self.ticket.sessionid, stored)
+
+    def test_connection_open_joins_the_callers_open_session(self):
+        # The browser already holds this connection. A second RDP login is
+        # what Windows shows as SESSION_CONFLICT. Join the stored guacd id.
+        existing = uuid.uuid4()
+        self.ticket.sessionid = existing
+        self.ticket.save(update_fields=["sessionid"])
+        before = Ticket.objects.count()
+        payload = self.tool(
+            "guacozy_open_desktop",
+            {"connection_id": str(self.connection.id)},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["data"]["joined"])
+        self.assertEqual(payload["data"]["ticket_id"], str(self.ticket.id))
+        self.assertEqual(Ticket.objects.count(), before)
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [["$" + str(existing)]],
+        )
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.sessionid, existing)
+
+    def test_connection_open_does_not_take_another_users_session(self):
+        existing = uuid.uuid4()
+        self.ticket.sessionid = existing
+        self.ticket.save(update_fields=["sessionid"])
+        payload = self.tool_as(
+            self.staff,
+            "guacozy_open_desktop",
+            {"connection_id": str(self.connection.id)},
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["data"]["joined"])
+        self.assertNotEqual(payload["data"]["ticket_id"], str(self.ticket.id))
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.sessionid, existing)
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [["ssh"]],
+        )
+
+    def test_connection_open_leaves_an_expired_session_alone(self):
+        existing = uuid.uuid4()
+        Ticket.objects.filter(pk=self.ticket.pk).update(
+            sessionid=existing,
+            created=timezone.now() - timedelta(days=3),
+        )
+        payload = self._open(connection_id=str(self.connection.id))
+        self.assertFalse(payload["data"]["joined"])
+        self.assertNotEqual(payload["data"]["ticket_id"], str(self.ticket.id))
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.sessionid, existing)
+        self.assertEqual(
+            [args for opcode, args in self.fake.sent_copy() if opcode == "select"],
+            [["ssh"]],
+        )
+
+    def test_failed_reuse_keeps_the_open_ticket(self):
+        existing = uuid.uuid4()
+        self.ticket.sessionid = existing
+        self.ticket.save(update_fields=["sessionid"])
+        self.guacd.port = _closed_local_port()
+        self.guacd.save(update_fields=["port"])
+        payload = self.tool(
+            "guacozy_open_desktop",
+            {"connection_id": str(self.connection.id)},
+        )
+        self.assertEqual(payload["error"]["code"], "REMOTE_DESKTOP")
+        self.assertTrue(Ticket.objects.filter(pk=self.ticket.pk).exists())
 
     def test_new_session_uses_connection_parameters_without_logging_them(self):
         self.fake.server_args = ("hostname", "password", "font-size")
@@ -1886,15 +2013,48 @@ class AgentDesktopTests(TestCase):
             self.assertEqual(denied["error"]["retry"], "never", name)
         self.assertEqual(self.fake.sent_copy()[before:], [])
 
-    def test_bad_frame_becomes_stale_and_closes_the_socket(self):
+    def test_bad_or_unknown_image_keeps_the_last_picture(self):
         self._open()
-        junk = base64.b64encode(b"not a png").decode("ascii")
         self.fake.send_to_agent([
             GuacamoleInstruction("size", "0", "2", "2"),
+            GuacamoleInstruction("img", "3", "0", "0", "image/png", "1", "0"),
+            GuacamoleInstruction("blob", "3", RED_PNG_B64),
+            GuacamoleInstruction("end", "3"),
+            GuacamoleInstruction("sync", "1"),
+        ])
+        deadline = time.monotonic() + 2
+        while True:
+            snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+            self.assertTrue(snap["ok"], snap)
+            raw = snap["data"]["png_base64"]
+            if raw:
+                image = Image.open(io.BytesIO(base64.b64decode(raw)))
+                if image.size == (2, 2) and image.getpixel((1, 0))[:3] == (255, 0, 0):
+                    break
+            self.assertLess(time.monotonic(), deadline, "frame was not published")
+            time.sleep(0.01)
+        junk = base64.b64encode(b"not a png").decode("ascii")
+        self.fake.send_to_agent([
             GuacamoleInstruction("img", "9", "0", "0", "image/png", "0", "0"),
             GuacamoleInstruction("blob", "9", junk),
             GuacamoleInstruction("end", "9"),
+            GuacamoleInstruction("img", "8", "0", "0", "image/gif", "0", "0"),
+            GuacamoleInstruction("blob", "8", RED_PNG_B64),
+            GuacamoleInstruction("end", "8"),
+            GuacamoleInstruction("sync", "2"),
         ])
+        self.assertTrue(self._wait_sent(
+            lambda rows: ["2"] in [args for opcode, args in rows if opcode == "sync"],
+        ))
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertTrue(snap["ok"], snap)
+        image = Image.open(io.BytesIO(base64.b64decode(snap["data"]["png_base64"])))
+        self.assertEqual(image.getpixel((1, 0))[:3], (255, 0, 0))
+        self.assertFalse(self.fake.agent_closed.is_set())
+
+    def test_disconnect_marks_the_session_stale(self):
+        self._open()
+        self.fake.send_to_agent([GuacamoleInstruction("disconnect")])
         self.assertTrue(self.fake.agent_closed.wait(2))
         snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
         self.assertEqual(snap["error"]["code"], "STALE_SESSION")
@@ -1972,6 +2132,14 @@ class AgentGuideTests(SimpleTestCase):
         text = pathlib.Path(__file__).resolve().parent.joinpath("agent", "desktop.py").read_text()
         self.assertNotIn("guacdproxy", text)
         self.assertNotIn("TunnelClient", text)
+
+    def test_one_daphne_process_owns_desktop_sessions(self):
+        text = pathlib.Path(__file__).resolve().parents[2].joinpath(
+            "docker", "supervisor-app.ini",
+        ).read_text()
+        asgi, _rest = text.split("[program:nginx]", 1)
+        self.assertIn("numprocs=1", asgi)
+        self.assertNotIn("numprocs=2", asgi)
 
     def test_agents_md_states_the_loop(self):
         text = pathlib.Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text()

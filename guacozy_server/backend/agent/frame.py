@@ -77,7 +77,7 @@ class Frame:
         self._layers[index] = resized
 
     def _img(self, stream, mode, layer, mime, x, y):
-        if mime != "image/png":
+        if mime not in ("image/png", "image/jpeg"):
             raise ValueError(f"unsupported mime: {mime}")
         # Composite mode is accepted and ignored. The PNG is pasted with its own alpha.
         int(mode)
@@ -149,10 +149,30 @@ class Frame:
         # x, y are the hotspot. The source rectangle is the pointer image and is not drawn.
         self._cursor = (int(x), int(y))
 
+    def _grow_buffer(self, index, x, y, width, height):
+        # guacd's previous-frame buffer is a negative layer and never receives
+        # size. The browser grows it to fit each draw. A 0x0 buffer drops the
+        # copy, so the next frame cannot replay those pixels.
+        layer = self._layer(index)
+        new_width = max(layer.width, x + width)
+        new_height = max(layer.height, y + height)
+        if new_width <= layer.width and new_height <= layer.height:
+            return
+        if new_width < 0:
+            new_width = 0
+        if new_height < 0:
+            new_height = 0
+        grown = Image.new("RGBA", (new_width, new_height), (0, 0, 0, 0))
+        if layer.width and layer.height:
+            grown.paste(layer, (0, 0))
+        self._layers[index] = grown
+
     def _paint(self, layer_index, patch, x, y, *, replace):
-        dest = self._layer(layer_index)
         if patch.mode != "RGBA":
             patch = patch.convert("RGBA")
+        if layer_index < 0:
+            self._grow_buffer(layer_index, x, y, patch.width, patch.height)
+        dest = self._layer(layer_index)
         src_x = 0
         src_y = 0
         if x < 0:

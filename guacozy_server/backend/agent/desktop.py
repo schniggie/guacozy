@@ -1,8 +1,11 @@
 import base64
+import logging
+import re
 import socket
 import threading
 import uuid
 
+from django.utils import timezone
 from guacamole.client import GuacamoleClient
 from guacamole.exceptions import GuacamoleError, InvalidInstruction
 from guacamole.instruction import GuacamoleInstruction
@@ -14,16 +17,22 @@ from backend.agent.management import (
     _invalid,
     _missing,
     _owned_ticket,
+    _owned_tickets,
     _tool,
     _unexpected,
     _visible_connection,
 )
 from backend.models import AppSettings, Connection, Ticket, TicketLog
 
-# Fixed client size for a new session. Join must not send size.
+# Sent on every handshake, including a join. A size after ready would resize
+# the shared desktop. guacd's first args name is a protocol token; answer with
+# the newest version this client implements, and never a higher one.
 _WIDTH = 1280
 _HEIGHT = 720
 _DPI = 96
+_SUPPORTED_VERSION = (1, 5, 0)
+_VERSION = re.compile(r"^VERSION_(\d+)_(\d+)_(\d+)$")
+logger = logging.getLogger("backend.agent")
 _MAX_CLICKS = 5
 _MAX_TYPE = 2000
 _NOTE = "Pixels, origin top left. There are no element refs."
@@ -47,6 +56,15 @@ _SESSIONS = {}
 _SESSIONS_LOCK = threading.Lock()
 
 
+def _version_reply(token):
+    match = _VERSION.match(token)
+    if match is None:
+        return None
+    offered = tuple(int(part) for part in match.groups())
+    chosen = offered if offered <= _SUPPORTED_VERSION else _SUPPORTED_VERSION
+    return "VERSION_%d_%d_%d" % chosen
+
+
 def _stale(retry):
     return fail("STALE_SESSION", "The desktop session is gone.", retry)
 
@@ -56,7 +74,7 @@ def _remote():
 
 
 class AgentClient(GuacamoleClient):
-    """Handshake omits size when joining a session. Sends are not logged."""
+    """Handshake answers the protocol version and always sends size. Sends are not logged."""
 
     def __init__(self, host, port, timeout=20, debug=False, logger=None):
         super().__init__(host, port, timeout=timeout, debug=debug, logger=logger)
@@ -147,15 +165,20 @@ class AgentClient(GuacamoleClient):
             self.close()
             raise GuacamoleError("Expected args")
 
-        # Joining an existing guacd session must not send size.
-        if "connectionid" not in kwargs:
-            self.send_instruction(GuacamoleInstruction("size", _WIDTH, _HEIGHT, _DPI))
+        connection_args = []
+        for index, arg in enumerate(args_instruction.args):
+            if index == 0:
+                version = _version_reply(arg)
+                if version is not None:
+                    connection_args.append(version)
+                    continue
+            connection_args.append(kwargs.get(arg.replace("-", "_"), ""))
+        # Size is required on a join. Without it guacd leaves the joiner at
+        # 0x0 and does not replay the screen that is already open.
+        self.send_instruction(GuacamoleInstruction("size", _WIDTH, _HEIGHT, _DPI))
         self.send_instruction(GuacamoleInstruction("audio"))
         self.send_instruction(GuacamoleInstruction("video"))
-        self.send_instruction(GuacamoleInstruction("image", "image/png"))
-        connection_args = [
-            kwargs.get(arg.replace("-", "_"), "") for arg in args_instruction.args
-        ]
+        self.send_instruction(GuacamoleInstruction("image", "image/png", "image/jpeg"))
         self.send_instruction(GuacamoleInstruction("connect", *connection_args))
 
         ready = self._read_instruction()
@@ -213,6 +236,7 @@ class _Session:
                 try:
                     instruction = GuacamoleInstruction.load(raw)
                 except (InvalidInstruction, UnicodeError):
+                    logger.warning("desktop reader stopped on an unreadable instruction")
                     return
                 if instruction.opcode == "sync":
                     # Reply before publishing so a snapshot cannot observe an unacked frame.
@@ -227,11 +251,17 @@ class _Session:
                         self.generation += 1
                         self.published.notify_all()
                     continue
+                # error and disconnect end the remote session. One bad drawing
+                # instruction must not, or the desktop dies on the next frame.
+                if instruction.opcode in ("error", "disconnect"):
+                    logger.warning("desktop reader stopped on %s", instruction.opcode)
+                    return
                 try:
                     with self.state_lock:
                         self.frame.apply(instruction)
                 except Exception:
-                    return
+                    logger.warning("desktop reader skipped %s", instruction.opcode)
+                    continue
         finally:
             if not self._clean_shutdown:
                 self.client.close()
@@ -244,6 +274,26 @@ def _session_owner(ticket):
         ticket.parent.refresh_from_db(fields=["sessionid"])
         return ticket.parent
     return ticket
+
+
+def _joinable_ticket(user, connection):
+    # The browser ticket already has the guacd id. A new handshake is a second
+    # login, and Windows disconnects that browser with SESSION_CONFLICT.
+    now = timezone.now()
+    rows = list(
+        _owned_tickets(user).filter(connection=connection).order_by("-created")
+    )
+    fallback = None
+    for ticket in rows:
+        if ticket.created + ticket.validityperiod < now:
+            continue
+        if _session_owner(ticket).sessionid is None:
+            continue
+        if ticket.control:
+            return ticket
+        if fallback is None:
+            fallback = ticket
+    return fallback
 
 
 def _store_sessionid(ticket, guacd_id):
@@ -380,13 +430,18 @@ def open_desktop(user, arguments):
         if connection.passthrough_credentials:
             return _denied(_NO_SESSION_PASSWORD)
         # Model default lifetime is one day. Opening does not require staff.
-        ticket = Ticket.objects.create(
-            connection=connection,
-            user=user,
-            author=user,
-            control=True,
-            parent=None,
-        )
+        # Reuse the caller's open ticket. Deleting it on failure would drop
+        # the browser's sidebar session.
+        ticket = _joinable_ticket(user, connection)
+        created = ticket is None
+        if ticket is None:
+            ticket = Ticket.objects.create(
+                connection=connection,
+                user=user,
+                author=user,
+                control=True,
+                parent=None,
+            )
     else:
         ticket = _owned_ticket(user, arguments["ticket_id"])
         if isinstance(ticket, dict):
@@ -397,8 +452,7 @@ def open_desktop(user, arguments):
         connection = source.connection
         if connection.passthrough_credentials:
             return _denied(_NO_SESSION_PASSWORD)
-
-    created = has_connection
+        created = False
     existing = _session_owner(ticket).sessionid
     client = None
     joined = False
