@@ -2052,6 +2052,19 @@ class AgentDesktopTests(TestCase):
         self.assertEqual(image.getpixel((1, 0))[:3], (255, 0, 0))
         self.assertFalse(self.fake.agent_closed.is_set())
 
+    def test_keepalive_nop_is_answered(self):
+        # guacd drops a user that never writes back, and a stuck user blocks
+        # every other client on that connection, including the browser.
+        self._open()
+        before = len(self.fake.sent_copy())
+        self.fake.send_to_agent([GuacamoleInstruction("nop")])
+        self.assertTrue(self._wait_sent(
+            lambda rows: [opcode for opcode, _args in rows[before:]] == ["nop"],
+        ))
+        snap = self.tool("guacozy_snapshot", {"session_id": self.session_id})
+        self.assertTrue(snap["ok"], snap)
+        self.assertFalse(self.fake.agent_closed.is_set())
+
     def test_disconnect_marks_the_session_stale(self):
         self._open()
         self.fake.send_to_agent([GuacamoleInstruction("disconnect")])

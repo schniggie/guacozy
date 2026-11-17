@@ -251,6 +251,17 @@ class _Session:
                         self.generation += 1
                         self.published.notify_all()
                     continue
+                if instruction.opcode == "nop":
+                    # guacd treats a silent user as gone and stops the whole
+                    # connection, so the browser spinner never finishes.
+                    try:
+                        with self.send_lock:
+                            self.client.send_instruction(
+                                GuacamoleInstruction("nop", *instruction.args)
+                            )
+                    except OSError:
+                        return
+                    continue
                 # error and disconnect end the remote session. One bad drawing
                 # instruction must not, or the desktop dies on the next frame.
                 if instruction.opcode in ("error", "disconnect"):
