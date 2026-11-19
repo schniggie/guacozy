@@ -1,64 +1,52 @@
 ## Step 0
-Make sure you have docker-compose
+
+Install Docker Compose v2. From the repo root, copy the environment file and fill in the three required values. The comments in `.env.example` show how to generate them.
+
+```shell
+cp .env.example .env
 ```
-docker-compose --version
-```
-or install docker-compose [here](https://docs.docker.com/compose/install/)
+
+`DJANGO_SECRET_KEY`, `FIELD_ENCRYPTION_KEY`, and `POSTGRES_PASSWORD` must be set. `POSTGRES_PASSWORD` must be letters and digits. Compose will not start while any of them is empty.
+
+`DJANGO_ALLOWED_HOSTS` defaults to `localhost,127.0.0.1`. Add every hostname you open in the browser.
 
 ## Step 1
-Create empty directory (e.g. named "guacozy") and add `docker-compose.yml`
 
-```yaml
-# docker-compose.yml
+The repo already contains `docker-compose.yml`. It builds this tree. It does not use the older `guacozy/guacozy-server` image on Docker Hub.
 
-version: '3'  
-services:
-  server:
-    image: guacozy/guacozy-server
-    restart: always
-    depends_on:
-      - db
-    environment:
-      - DJANGO_SECRET_KEY=abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
-      - FIELD_ENCRYPTION_KEY=qjq4ObsXMqiqQyfKgD-jjEGm4ep8RaHKGRg4ohGCi1A=
-      - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
-      - DJANGO_ALLOWED_HOSTS=*
-    ports:
-      - 10080:80
-      - 10443:443
-  guacd:
-    image: linuxserver/guacd
-    restart: always
-  db:
-    image: postgres:10.4-alpine
-    restart: always
-    volumes:
-    - postgres-data:/var/lib/postgresql/data
-volumes:
-  postgres-data:
+```shell
+docker compose up --build
 ```
 
-Adjust environment variables (refer [Environment variables](environment-variables.md) section)
+The stack is:
+
+- `server` — nginx, Daphne, and the built React app, published on `10443`
+- `guacd` — `guacamole/guacd:1.6.0`
+- `db` — Postgres 18 on the volume `postgres18-data`, mounted at `/var/lib/postgresql`
+
+Port 80 is not published. Open:
+
+- https://127.0.0.1:10443/cozy/ when Docker is on this machine
+- https://your-docker-host:10443/cozy/ when it is on another host
+
+The browser warns about the first self-signed certificate. That pair is kept on the `guacozy-ssl` volume.
+
 ## Step 2
-Open shell in the directory hosting docker-compose.yml file and start stack in attached mode   
-```
-docker-compose up
-```
-Read the logs.   
-Access the application:  
-- https://127.0.0.1:10443 (if you run docker on local linux/mac machine)
-- https://192.168.99.100:10443 (if you run docker on windows. You can get the IP using `docker-machine ip` command)
-- https://your-docker-host:10443 (if you are running it on a dedicated docker host/VM)
 
-In case of problems read [Troubleshooting](troubleshooting.md) section.
+A superuser is created only when `.env` sets `SUPERUSER_PASSWORD`. The username defaults to `admin` and the email to `admin@example.com`. There is no built-in `admin` / `admin` account.
+
+Sign in with the account you configured, or create one with:
+
+```shell
+docker compose exec server ./manage.py createsuperuser
+```
 
 ## Step 3
-Try to login using default username/password:  
-username: **admin**  
-password: **admin**
 
-## Step 4
-If everything seems right, shutdown application by pressing Ctrl+C once (in terminal where docker-compose is running) and start in detached mode:
+Leave the stack running with:
+
+```shell
+docker compose up --build -d
 ```
-docker-compose up -d
-```
+
+Read [Environment variables](environment-variables.md) before you point this at a database that already has connections. That database must keep its current `FIELD_ENCRYPTION_KEY`. A Postgres volume created with trust authentication does not pick up `POSTGRES_PASSWORD` on its own.

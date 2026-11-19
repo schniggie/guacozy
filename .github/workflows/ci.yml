@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  django:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: guacozy_server
+    env:
+      DJANGO_SECRET_KEY: test-only-not-a-deploy-secret-0123456789abcdef
+      FIELD_ENCRYPTION_KEY: elL5fKeNrCWH3GvpZJqmZQIl5ezIJlshHnqfBRk7f2M=
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build libraries for psycopg2
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev gcc
+      - name: Install Python requirements
+        run: pip install -r requirements.txt
+      - name: Django check
+        run: python manage.py check
+      - name: Django tests
+        run: python manage.py test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build

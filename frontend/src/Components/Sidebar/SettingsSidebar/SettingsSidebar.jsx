@@ -1,6 +1,6 @@
 import React, {useContext} from 'react';
 import {AppContext} from "../../../Context/AppContext";
-import {Container, Divider, Segment} from "semantic-ui-react";
+import {Container, Divider, Segment} from "../../../ui/ui";
 import TabLink from "../TabLink/TabLink";
 import {SETTINGS_LINKS} from "../../../settings"
 

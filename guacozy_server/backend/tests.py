@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
+from django.conf import settings
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection
 from django.test import Client, TestCase, TransactionTestCase
@@ -65,6 +66,12 @@ def _ticket_tunnel_consumers(application):
 
 
 class LoginAndAsgiRouteTests(TestCase):
+    def test_api_client_can_read_the_csrf_cookie(self):
+        self.assertFalse(settings.CSRF_COOKIE_HTTPONLY)
+        self.assertTrue(settings.SESSION_COOKIE_HTTPONLY)
+        self.assertFalse(settings.CSRF_COOKIE_SECURE)
+        self.assertFalse(settings.SESSION_COOKIE_SECURE)
+
     def test_login_page_renders_password_form(self):
         response = self.client.get("/accounts/login/")
         self.assertEqual(response.status_code, 200)

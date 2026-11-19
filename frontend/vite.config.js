@@ -25,12 +25,14 @@ export default defineConfig({
     fs: {
       allow: [frontendRoot, sharedCssDir],
     },
+    // Keep the browser Host. A string target makes Vite rewrite Host to
+    // port 8000, and Django then rejects the login POST as a bad origin.
     proxy: {
-      '/api': httpTarget,
-      '/admin': httpTarget,
-      '/accounts': httpTarget,
-      '/staticfiles': httpTarget,
-      '/tunnelws': {target: wsTarget, ws: true},
+      '/api': {target: httpTarget, changeOrigin: false},
+      '/admin': {target: httpTarget, changeOrigin: false},
+      '/accounts': {target: httpTarget, changeOrigin: false},
+      '/staticfiles': {target: httpTarget, changeOrigin: false},
+      '/tunnelws': {target: wsTarget, ws: true, changeOrigin: false},
     },
   },
   define: {

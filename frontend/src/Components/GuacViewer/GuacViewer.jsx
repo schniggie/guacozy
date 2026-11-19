@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import Guacamole from 'guacamole-common-js'
-import {Button, Dimmer, Divider, Loader} from "semantic-ui-react";
+import {Button, Dimmer, Divider, Loader} from "../../ui/ui";
 import {GUACAMOLE_STATUS, GUACAMOLE_CLIENT_STATES} from "./const";
 
 /***
@@ -346,7 +346,7 @@ function GuacViewer({wspath, tabIndex, controlSize = true, controlInput = true, 
     };
 
     return (
-        <React.Fragment>
+        <div className="gc-viewer">
             <div ref={displayRef}
                  onClick={parentOnClickHandler}
                  style={{
@@ -378,7 +378,7 @@ function GuacViewer({wspath, tabIndex, controlSize = true, controlInput = true, 
                     </Button>
                 </Loader>
             </Dimmer>
-        </React.Fragment>
+        </div>
     );
 }
 

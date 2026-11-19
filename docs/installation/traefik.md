@@ -53,21 +53,23 @@ services:
       traefik.enable: true
       traefik.frontend.rule: guacozy.example.com
     environment:
-      - DJANGO_SECRET_KEY=abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
-      - FIELD_ENCRYPTION_KEY=qjq4ObsXMqiqQyfKgD-jjEGm4ep8RaHKGRg4ohGCi1A=
-      - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+      - FIELD_ENCRYPTION_KEY=${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY in .env}
+      - DJANGO_DB_URL=postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/postgres
       - DJANGO_ALLOWED_HOSTS=guacozy.example.com
       - DEBUG=False
   guacd:
-    image: guacamole/guacd
+    image: guacamole/guacd:1.6.0
     restart: always
     networks:
       - default
   db:
-    image: postgres:10.4-alpine
+    image: postgres:18-alpine
     restart: always
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - ./data/postgres-data:/var/lib/postgresql/data
+      - ./data/postgres18:/var/lib/postgresql
     networks:
       - default
 

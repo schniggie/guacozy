@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 
 import environ
 from django.conf.locale.en import formats as en_formats
@@ -10,7 +11,24 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env = environ.Env()
 environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
 
-SECRET_KEY = env('DJANGO_SECRET_KEY', default='abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz')
+# manage.py test has no deploy env. The stand-in values below are for that
+# process only. A real process exits when the variables are missing.
+_TESTING = "test" in sys.argv
+
+
+def _required_setting(name, test_value):
+    value = env.str(name, default="")
+    if value:
+        return value
+    if _TESTING:
+        return test_value
+    raise ImproperlyConfigured(f"Set {name} in the environment. See .env.example.")
+
+
+SECRET_KEY = _required_setting(
+    "DJANGO_SECRET_KEY",
+    "test-only-not-a-deploy-secret-0123456789abcdef",
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env.bool('DEBUG', default=False)
@@ -20,6 +38,17 @@ ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.
 # Setup support for proxy headers
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# The API client reads csrftoken from document.cookie.
+CSRF_COOKIE_HTTPONLY = False
+SESSION_COOKIE_HTTPONLY = True
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+if _TESTING:
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+else:
+    SESSION_COOKIE_SECURE = env.bool("SESSION_COOKIE_SECURE", default=not DEBUG)
+    CSRF_COOKIE_SECURE = env.bool("CSRF_COOKIE_SECURE", default=not DEBUG)
 
 # Name in grapelli-admin
 GRAPPELLI_ADMIN_TITLE = "Guacozy Administration"
@@ -110,7 +139,8 @@ CACHES = {
 }
 
 # django-environ 0.14 still maps memcache:// to Django's removed
-# python-memcached backend. Django 4.1+ only ships PyMemcacheCache.
+# MemcachedCache name. Django ships PyMemcacheCache (pymemcache).
+# python-memcached is not installed.
 if CACHES['default']['BACKEND'] == 'django.core.cache.backends.memcached.MemcachedCache':
     CACHES['default']['BACKEND'] = 'django.core.cache.backends.memcached.PyMemcacheCache'
 
@@ -220,8 +250,11 @@ ASGI_APPLICATION = "guacozy_server.asgi.application"
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/'
 
-# Field encryption key
-FIELD_ENCRYPTION_KEY = env.str('FIELD_ENCRYPTION_KEY', default='Fg5rOYvc_hUjsWoyOwqW_bm4tuZn9UDbRpN-ajrvvoM=')
+# Test-only Fernet key. Not a deploy key. Keep the key a database was written with.
+FIELD_ENCRYPTION_KEY = _required_setting(
+    "FIELD_ENCRYPTION_KEY",
+    "elL5fKeNrCWH3GvpZJqmZQIl5ezIJlshHnqfBRk7f2M=",
+)
 
 #
 # LDAP authentication (optional)

@@ -1,6 +1,6 @@
 import React, {useContext, useRef, useState} from 'react';
 import {AppContext} from "../../Context/AppContext";
-import {Button, Form, Header, Icon, Message, Modal} from "semantic-ui-react";
+import {Button, Form, Header, Icon, Message, Modal} from "../../ui/ui";
 import ModalBase from "./ModalBase";
 
 function RenameFolderModal({handleClose, data}) {

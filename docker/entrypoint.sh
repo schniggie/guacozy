@@ -5,14 +5,9 @@ set -e
 # This is needed because currently memcached is not started and we need cache inside management commands
 export CACHE_URL=locmemcache://
 
-echo "Checking if FIELD_ENCRYPTION_KEY variable is set..."
-if [ -z "$FIELD_ENCRYPTION_KEY" ]
-then
-      echo "FIELD_ENCRYPTION_KEY is not set, will be using a default one. "
-      echo "You should provide FIELD_ENCRYPTION_KEY environment variable  - generate with"
-      echo "./manage.py generate_encryption_key"
-      echo "Generating one for you now:"
-      echo "$(python ./manage.py generate_encryption_key)"
+if [ -z "${DJANGO_SECRET_KEY:-}" ] || [ -z "${FIELD_ENCRYPTION_KEY:-}" ]; then
+  echo "DJANGO_SECRET_KEY and FIELD_ENCRYPTION_KEY must be set. See .env.example." >&2
+  exit 1
 fi
 
 # wait shortly and then run db migrations (retry on error)
@@ -22,25 +17,27 @@ while ! python ./manage.py migrate 2>&1; do
   sleep 3
 done
 
-# create superuser silently
-if [ -z ${SUPERUSER_NAME+x} ]; then
-  SUPERUSER_NAME='admin'
-fi
-if [ -z ${SUPERUSER_EMAIL+x} ]; then
-  SUPERUSER_EMAIL='admin@example.com'
-fi
-if [ -z ${SUPERUSER_PASSWORD+x} ]; then
-    SUPERUSER_PASSWORD='admin'
-fi
-
-echo "Username: ${SUPERUSER_NAME}, E-Mail: ${SUPERUSER_EMAIL}"
-
-python ./manage.py shell --interface python << END
+# Create a superuser only when a password was provided. An existing user is left as it is.
+if [ -z "${SUPERUSER_PASSWORD:-}" ]; then
+  echo "SUPERUSER_PASSWORD is unset. Skipping superuser creation."
+else
+  if [ -z "${SUPERUSER_NAME:-}" ]; then
+    SUPERUSER_NAME=admin
+  fi
+  if [ -z "${SUPERUSER_EMAIL:-}" ]; then
+    SUPERUSER_EMAIL=admin@example.com
+  fi
+  export SUPERUSER_NAME SUPERUSER_EMAIL SUPERUSER_PASSWORD
+  echo "Ensuring superuser ${SUPERUSER_NAME} (${SUPERUSER_EMAIL}) exists."
+  python ./manage.py shell --interface python << 'END'
+import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-if not User.objects.filter(username='${SUPERUSER_NAME}'):
-    u=User.objects.create_superuser('${SUPERUSER_NAME}', '${SUPERUSER_EMAIL}', '${SUPERUSER_PASSWORD}')
+name = os.environ["SUPERUSER_NAME"]
+if not User.objects.filter(username=name).exists():
+    User.objects.create_superuser(name, os.environ["SUPERUSER_EMAIL"], os.environ["SUPERUSER_PASSWORD"])
 END
+fi
 
 # copy static files
 python ./manage.py collectstatic --no-input
@@ -54,17 +51,20 @@ python ./manage.py initguacd
 export CACHE_URL=memcache:///tmp/memcached.sock
 
 # Nginx
-# if certificates doesn't exist create a self signed certificate
+# Generate a certificate only when both files are missing. Leave a pair that is already there.
 echo " "
 echo "Checking that SSL certificate and key files exist..."
 
-[ ! -f /ssl/cert.key ] && \
-[ ! -f /ssl/cert.crt ] && \
-echo "/ssl/cert.crt and /ssl/cert.key not provided" && \
-echo "Creating self signed certificate:" && \
-mkdir -p /ssl && \
-openssl req -x509 -nodes -days 3650 -subj "/CN=guacozy" -addext "subjectAltName=DNS:guacozy" -newkey rsa:4096 -keyout /ssl/cert.key -out /ssl/cert.crt;
-
+if [ -f /ssl/cert.key ] && [ -f /ssl/cert.crt ]; then
+  echo "Using the certificate already in /ssl."
+elif [ -f /ssl/cert.key ] || [ -f /ssl/cert.crt ]; then
+  echo "Provide both /ssl/cert.key and /ssl/cert.crt." >&2
+  exit 1
+else
+  echo "Creating a self-signed certificate in /ssl."
+  mkdir -p /ssl
+  openssl req -x509 -nodes -days 3650 -subj "/CN=guacozy" -addext "subjectAltName=DNS:guacozy" -newkey rsa:4096 -keyout /ssl/cert.key -out /ssl/cert.crt
+fi
 
 echo "Initialisation is done."
 

@@ -1,4 +1,4 @@
-import {Icon} from "semantic-ui-react";
+import {Icon} from "../ui/ui";
 import React from "react";
 
 const getIcon = (isFolder, protocol) => {

@@ -1,6 +1,6 @@
 import React, {useContext, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {AppContext} from "../../Context/AppContext";
-import {Button, Form, Header, Icon, Label, Message, Modal} from "semantic-ui-react";
+import {Button, Form, Header, Icon, Message, Modal} from "../../ui/ui";
 import ModalBase from "./ModalBase";
 import {VALIDITY_PERIOD_OPTIONS} from "../../settings";
 import {formatDateString} from "../../Utils/formateDateString";
@@ -125,8 +125,8 @@ function ShareTicketModal({handleClose, data}) {
                             <Form.Checkbox
                                 name="control"
                                 onChange={handleChange}
-                                label={<label>Allow input (keyboard/mouse)</label>}
-                                value={formData.allow}
+                                label="Allow input (keyboard/mouse)"
+                                checked={formData.control}
                             />
                         </Form.Group>
                     </Form>

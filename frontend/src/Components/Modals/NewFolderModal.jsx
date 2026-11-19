@@ -1,6 +1,6 @@
 import React, {useState, useContext, useRef} from 'react';
 import {AppContext} from "../../Context/AppContext";
-import {Button, Form, Header, Icon, Message, Modal} from "semantic-ui-react";
+import {Button, Form, Header, Icon, Message, Modal} from "../../ui/ui";
 import ModalBase from "./ModalBase";
 
 function NewFolderModal({handleClose, data}) {

@@ -1,6 +1,6 @@
 import React, {useContext, useState} from 'react';
 import {AppContext} from "../../../Context/AppContext";
-import {Accordion, SegmentGroup} from "semantic-ui-react";
+import {Accordion, SegmentGroup} from "../../../ui/ui";
 import TicketElement from "./TicketElement";
 
 function TicketsList({searchString}) {

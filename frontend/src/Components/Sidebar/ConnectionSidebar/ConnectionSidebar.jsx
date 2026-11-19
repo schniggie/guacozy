@@ -1,5 +1,5 @@
 import React, {useContext, useRef, useState} from 'react';
-import {Button, Container, Icon, Input, Segment} from "semantic-ui-react";
+import {Button, Container, Icon, Input, Segment} from "../../../ui/ui";
 import './ConnectionSidebar.css'
 import ConnectionsTree from "../ConnectionsTree/ConnectionsTree";
 import TicketsSegment from "../TicketsSegment/TicketsSegment";
@@ -25,8 +25,7 @@ function ConnectionSidebar(props) {
                            code === 27 && setTreeNodeFilterString("")
                        }}
                        ref={searchInputRef}>
-                    <input/>
-                    <Icon name='times circle outline' size='large' link
+                    <Icon name='times circle outline' size='large'
                           onClick={() => setTreeNodeFilterString("")}/>
                 </Input>
             </Segment>

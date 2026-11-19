@@ -4,7 +4,7 @@ You will want to run guacozy over SSL because of several reasons:
 - Guacamole protocol is text base and unencrypted by itself
 - Clipboard sync doesn't work over HTTP on hosts other than localhost
 
-If certificate is not provided, it is generated on every start (in entrypoint.sh)
+If both files are missing, the entrypoint writes a self-signed pair once. A pair that is already in `/ssl` is left as it is. The compose file keeps that directory on the `guacozy-ssl` volume.
   
 You can provide your certificates by mounting to /ssl/ and providing  
 ```
@@ -34,7 +34,7 @@ and put private key in PEM format to `cert.key`
 Now you can mount your `cert` directory using bind mount:
 ###### docker run
 ```shell script
-docker run -it --rm -p 10080:80 -p 10443:443 -v ./certs:/ssl guacozy/guacozy-server
+docker run -it --rm -p 10443:443 -v ./certs:/ssl guacozy/guacozy-server
 ```
 ###### docker-compose
 ```yaml
@@ -45,16 +45,16 @@ services:
        - ./certs:/ssl  
 ...
 ```
-### Option: make generated certs persistent
-You can make the certificates generated during startup static by providing a persistent volume to **/ssl** path
+### Option: keep the generated certificate
+`docker-compose.yml` already mounts a named volume at `/ssl`:
+
 ```yaml
 services:
   server:
-    image: guacozy/guacozy-server
     volumes:
-      - ssl:/ssl
-...
+      - guacozy-ssl:/ssl
 volumes:
-  ssl:
-  staticfiles:
+  guacozy-ssl:
 ```
+
+The certificate is written only when that volume has neither `cert.crt` nor `cert.key`.

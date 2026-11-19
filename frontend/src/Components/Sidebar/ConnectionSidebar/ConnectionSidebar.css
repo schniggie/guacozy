@@ -5,21 +5,21 @@
     flex-direction: column !important;
 }
 
-.sidebarContainer .ui.segment {
+.sidebarContainer .gc-segment {
     margin: var(--gc-space-1, 4px) !important;
     overflow-x: hidden;
     background-color: var(--gc-surface, #151515);
 }
 
 /* Search input segment */
-.sidebarContainer .ui.segment.searchInputSegment {
+.sidebarContainer .gc-segment.searchInputSegment {
     padding: 8px;
     flex-shrink: 0;
     flex-grow: 0;
 }
 
 /* ConnectionsTree segment */
-.sidebarContainer .ui.segment.connectionList {
+.sidebarContainer .gc-segment.connectionList {
     flex-grow: 1;
     flex-shrink: 1;
     padding: 0;
@@ -35,20 +35,20 @@
 }
 
 /* topButtonRight inside connectionList segment */
-.sidebarContainer .ui.segment.connectionList .topButtonRight {
+.sidebarContainer .gc-segment.connectionList .topButtonRight {
     float: right;
     margin: 2px 2px 0 0;
 }
 
 /* topButtonLeft inside connectionList segment */
-.sidebarContainer .ui.segment.connectionList .topButtonLeft {
+.sidebarContainer .gc-segment.connectionList .topButtonLeft {
     float: left;
     margin: 2px -4px 0 2px;
 }
 
 
 /* ticket list main segment */
-.sidebarContainer .ui.segment.ticketList {
+.sidebarContainer .gc-segment.ticketList {
     padding: 3px 5px 3px 5px;
     min-height: 40px;
     flex-shrink: 0;
@@ -56,13 +56,13 @@
 }
 
 /* internal segments - these are active tickets */
-.sidebarContainer .ui.segments.ticketList {
+.sidebarContainer .gc-segments.ticketList {
     font-size: 0.9rem;
     padding: 0 5px 0 5px;
     margin-top: -20px;
 }
 
-.sidebarContainer .ui.segments.ticketList div.ticketItem:hover {
+.sidebarContainer .gc-segments.ticketList div.ticketItem:hover {
     background-color: var(--gc-surface-2, #292929);
 }
 
@@ -73,17 +73,17 @@
 .ticketSectionHeader {
     color: var(--gc-muted, darkgrey);
 }
-.sidebarContainer .ui.segments.ticketList div.ticketItem .ticketDetails{
+.sidebarContainer .gc-segments.ticketList div.ticketItem .ticketDetails{
     background-color: var(--gc-ink-2, #202020);
     margin: 5px 0;
     padding: 5px;
     border: 1px dashed var(--gc-line, #606060);
 }
 
-.sidebarContainer .ui.segments.ticketList div span:hover.activatable {
+.sidebarContainer .gc-segments.ticketList div span:hover.activatable {
     cursor: pointer;
 }
 
-.sidebarContainer .ui.accordion .title {
-    color: #FFFFFF !important;
+.sidebarContainer .gc-accordion-title {
+    color: var(--gc-text, #ffffff);
 }

@@ -8,15 +8,19 @@ Sometime you will want do have several guacd servers
 When using docker-compose - add a guacd service in your stack
 ```
   guacd:
-    image: guacamole/guacd
+    image: guacamole/guacd:1.6.0
     restart: always
 ```
 When running in docker-compose you do not have to expose port, as other containers will have access to it under DNS name `guacd` 
 
 Or if you want to run it in a different host - you can run it as a standalone container
 ```
-docker run --name guacdlocal --restart always -d -p 4822:4822 guacamole/guacd
+docker run --name guacdlocal --restart always -d -p 4822:4822 guacamole/guacd:1.6.0
 ```
+
+Pin `guacamole/guacd:1.6.0`. Do not use the `latest` tag.
+
+The browser client in this tree stays on `guacamole-common-js` 1.5.0, the last package Apache published. guacd 1.6 still speaks that protocol. The Python tunnel stays on `pyguacamole` 0.11, the last release on PyPI.
 
 List of alternative docker images with guacd  
 [Glyptodon guacd](https://hub.docker.com/r/glyptodon/guacd)   

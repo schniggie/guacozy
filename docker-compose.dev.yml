@@ -1,7 +1,7 @@
 # Development stack: docker compose -f docker-compose.dev.yml up
 version: '3'
 services:
-  django: 
+  django:
     build:
       context: ./guacozy_server/
     restart: always
@@ -9,12 +9,15 @@ services:
       - db
     volumes:
       - ./guacozy_server:/app
+    env_file:
+      - .env
     environment:
-      - DJANGO_SECRET_KEY=youshoulddefinetelychangethistosomethingelseandtakecare
-      - FIELD_ENCRYPTION_KEY=qjq4ObsXMqiqQyfKgD-jjEGm4ep8RaHKGRg4ohGCi1A=
-      - DJANGO_TIME_ZONE=Europe/Vilnius
-      - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
-      - DJANGO_ALLOWED_HOSTS=*
+      DEBUG: "true"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY in .env}
+      DJANGO_TIME_ZONE: ${DJANGO_TIME_ZONE:-Europe/Vilnius}
+      DJANGO_DB_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/postgres
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
     ports:
       - 8000:8000
   react:
@@ -29,14 +32,16 @@ services:
       - DJANGO_PROXY_HOST=django
       - DJANGO_PROXY_PORT=8000
   guacd:
-    image: guacamole/guacd
+    image: guacamole/guacd:1.6.0
     restart: always
   db:
     image: postgres:18-alpine
     restart: always
     environment:
-      # The app's DJANGO_DB_URL has no password. Trust keeps that URL working.
-      POSTGRES_HOST_AUTH_METHOD: trust
+      # Applied only when this volume is first created.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
     volumes:
     # PG 18 stores the cluster in /var/lib/postgresql/18/docker.
     # dev-postgres-data is the pre-18 cluster (PG_VERSION at the volume root).

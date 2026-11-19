@@ -1,8 +1,2 @@
-.git
-.venv
-**/node_modules
-frontend/build
-**/__pycache__
-**/*.pyc
-guacozy_server/db.sqlite3
-guacozy_server/tmp
+.env
+**/.env

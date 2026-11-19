@@ -9,7 +9,7 @@ Those two servers have file monitoring and automatic reload/live patch on code c
 If you develop on in IDE such as PyCharm, start 2 PyCharm instances and open each project in different directories  
 #### Open PyCharm in project root  
 
-Create virtualenv interpreter with Python 3.7     
+Create virtualenv interpreter with Python 3.13     
 Configure run command as "python ./manage.py runserver"   
 
 Environment:   
@@ -40,18 +40,19 @@ python ./manage.py generate_encryption_key
 ```
 
 #### Connect to development servers
-Connect to http://localhost:3000/ to open React App  
-Connect to http://localhost:8000/admin/ to open Django Admin  
+Open http://localhost:3000/ for the Vite shell.
+Open http://localhost:8000/admin/ for Django admin.
 
-Calls to django urls (`/admin/`, `/api/`, `/tunnelws/`) will be proxied by react development server (see `frontend/src/setupProxy.js`)
+Vite proxies `/api`, `/admin`, `/accounts`, `/staticfiles`, and the `/tunnelws` websocket to Django (`frontend/vite.config.js`).
 
 ### Docker-compose
 #### Start stack
 You can also start development environment as a docker compose stack.
 
-Inside project root run 
+Inside the project root, copy `.env.example` to `.env` and set the required values, then run:
+
 ```
-docker-compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 This will create a stack of containers:
 - django
@@ -75,23 +76,23 @@ Open another terminal and go to project folder.
 Run
 ```
 # Migrate database. Run once to initialize database and after you add any migrations
-docker-compose exec django python ./manage.py migrate
+docker compose -f docker-compose.dev.yml exec django python ./manage.py migrate
 
 # Create superuser
-docker-compose exec django python ./manage.py createsuperuser
+docker compose -f docker-compose.dev.yml exec django python ./manage.py createsuperuser
 
 # Optional. Initialize default guacd server reference
-docker-compose exec django python ./manage.py  initguacd
+docker compose -f docker-compose.dev.yml exec django python ./manage.py  initguacd
 
 # Optional. Initialize user groups
-docker-compose exec django python ./manage.py  initgroups
+docker compose -f docker-compose.dev.yml exec django python ./manage.py  initgroups
 
 # Optional Generate new field encryption key to use in FIELD_ENCRYPTION_KEY value
-docker-compose exec django python ./manage.py generate_encryption_key
+docker compose -f docker-compose.dev.yml exec django python ./manage.py generate_encryption_key
 
 ```
 #### Connect to development servers
-Connect to http://localhost:3000/ to open React App  
-Connect to http://localhost:8000/admin/ to open Django Admin 
+Open http://localhost:3000/ for the Vite shell.
+Open http://localhost:8000/admin/ for Django admin.
 
-Calls to django urls (`/admin/`, `/api/`, `/tunnelws/`) will be proxied by react development server (see `frontend/src/setupProxy.js`)
+Vite proxies `/api`, `/admin`, `/accounts`, `/staticfiles`, and the `/tunnelws` websocket to Django (`frontend/vite.config.js`).

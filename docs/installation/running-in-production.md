@@ -1,33 +1,32 @@
 If this is a production environment, make appropriate changes:
 
 ### Provide custom SSL certificates
-You can provide your own certificates, read more in [SSL section](https://guacozy.readthedocs.io/en/latest/installation/ssl/)
+You can provide your own certificates, read more in [SSL section](ssl.md)
 
-### Change published ports
-In the example we user ports 10080 and 10443  
-In productions you may want other ports and disable HTTP altogether because of security concerns
+### Published port
+The compose file publishes `10443` for HTTPS. Port 80 is not published. Clipboard sync needs HTTPS when the host is not localhost.
 
-### Disable HTTP port 
-Clipboard reading is available only on HTTPS ports when using host other than localhost, 
-so if you want to use clipboard sync feature, you will need to access via HTTPS
+### Set DJANGO_SECRET_KEY
+Required. Use 50 or more characters. Do not use `$`, because Compose expands it.
 
-### Change DJANGO_SECRET_KEY 
-Change to some other value (50 or more symbols, dont' use '$' symbol as it will try to expand variable).
+### Set FIELD_ENCRYPTION_KEY
+Required. Generate one before the first start and keep it. The server exits when the variable is empty. It does not create a replacement on startup.
 
-### Change FIELD_ENCRYPTION_KEY
-If you don't change FIELD_ENCRYPTION_KEY, the key from example will be used (bad idea).   
-If you don't specify FIELD_ENCRYPTION_KEY, on application start you will be notified (in container logs) about this, 
-and a new key will be generated on each start, which means your saved password will not work after restart.  
-  
-You can use the suggested value (in container logs) or you can generate one at any time using `generate_encryption_key` management command
+If the database already holds connection passwords, reuse the key those passwords were written with. A different key makes them unreadable.
 
-If you started using docker compose:   
+Generate a new key on a machine that already has the Python environment:
+
+```shell
+.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
-docker-compose exec server ./manage.py generate_encryption_key
-``` 
 
-If you have not started guacozy-server container
+Once the stack is running you can also print a new key with:
+
+```shell
+docker compose exec server ./manage.py generate_encryption_key
 ```
-# if you don't have container running
-docker run -it --rm guacozy/guacozy-server python /app/manage.py generate_encryption_key
-``` 
+
+Put the value you intend to keep into `.env` before you store any passwords.
+
+### Postgres password
+`POSTGRES_PASSWORD` is required and must be letters and digits. Postgres uses it when the data volume is first created. A volume created earlier with trust authentication keeps that setting. The password in `.env` does not change it. Set the role password and `pg_hba` yourself, or start a new volume.

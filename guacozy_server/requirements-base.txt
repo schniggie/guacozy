@@ -16,7 +16,6 @@ Pillow==13.0.0
 psycopg2==2.9.13
 pyguacamole==0.11
 pymemcache==4.0.0
-python-memcached==1.62
 pytz==2026.6
 rules==3.5
 sqlparse==0.6.1

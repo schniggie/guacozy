@@ -1,6 +1,6 @@
 import React, {useContext, useEffect, useState} from 'react';
 
-import {Confirm, Dimmer, Loader} from "semantic-ui-react";
+import {Confirm, Dimmer, Loader} from "../../ui/ui";
 import * as FlexLayout from "flexlayout-react";
 
 import {AppContext} from "../../Context/AppContext";

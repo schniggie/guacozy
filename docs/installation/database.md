@@ -5,7 +5,7 @@ Container build includes drivers for SQLite and PostgreSQL (psycopg2)
 
 ### DB in docker-compose
 The easiest way when running inside a container - run a stack with docker-compose which includes PostgreSQL container.  
-For this you specify a service named `db`, and link to it using connection string  `DJANGO_DB_URL=postgres://postgres@db:5432/postgres`
+For this you specify a service named `db`, and link to it using a password in `DJANGO_DB_URL`. The password must be letters and digits. Postgres 18 keeps its cluster under `/var/lib/postgresql`, not `/var/lib/postgresql/data`.
 Mount PostgreSQL data folder to named  volume or bind mount.
 
 ##### Using named volume
@@ -18,16 +18,18 @@ services:
     depends_on:
       - db
     environment:
-    - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
+    - DJANGO_DB_URL=postgres://postgres:lettersAndDigits@db:5432/postgres
 ...
   db:
-    image: postgres:10.4-alpine
+    image: postgres:18-alpine
     restart: always
+    environment:
+    - POSTGRES_PASSWORD=lettersAndDigits
     volumes:
-    - postgres-data:/var/lib/postgresql/data
+    - postgres18-data:/var/lib/postgresql
 ...
 volumes:
-  postgres-data:
+  postgres18-data:
 ```
 
 ##### Using bind mount
@@ -41,13 +43,15 @@ services:
     depends_on:
       - db
     environment:
-    - DJANGO_DB_URL=postgres://postgres@db:5432/postgres
+    - DJANGO_DB_URL=postgres://postgres:lettersAndDigits@db:5432/postgres
 ...
   db:
-    image: postgres:10.4-alpine
+    image: postgres:18-alpine
     restart: always
+    environment:
+    - POSTGRES_PASSWORD=lettersAndDigits
     volumes:
-    - ./data/postgres:/var/lib/postgresql/data
+    - ./data/postgres:/var/lib/postgresql
 ```
 
 ### Connection string examples
@@ -62,10 +66,13 @@ SQLite file `guacozydb.sqlite3` located under `/datafiles/` (note the four slash
 sqlite:////datafiles/guacozydb.sqlite3
 ```
 ##### PostgreSQL
-PostgreSQL located on server `db`, listening on port `5432`, using user `postgres` , no password and database name `postgres` 
+PostgreSQL located on server `db`, listening on port `5432`, using user `postgres`, a letters-and-digits password, and database name `postgres`:
+
 ```
-DJANGO_DB_URL=postgres://postgres@db:5432/postgres
+DJANGO_DB_URL=postgres://postgres:lettersAndDigits@db:5432/postgres
 ```
+
+Trust authentication is not used. Postgres applies `POSTGRES_PASSWORD` when the data volume is first created.
 
 PostgreSQL located on server `postdb.example.com`, listening on port `5432`, using user `guacozy_app` , password `Passw0rd` and database name `guacozy_db` 
 ```

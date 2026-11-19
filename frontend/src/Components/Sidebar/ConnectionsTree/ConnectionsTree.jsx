@@ -3,7 +3,7 @@ import Tree from "rc-tree";
 import './ConnectionsTree.css'
 import {AppContext} from "../../../Context/AppContext";
 import {LayoutContext} from "../../../Layout/LayoutContext";
-import {Button} from "semantic-ui-react";
+import {Button} from "../../../ui/ui";
 import {handleConnectionContextMenuEvent} from "../../ContextMenu/ConnectionContextMenu";
 import {handleFolderContextMenuEvent} from "../../ContextMenu/FolderContextMenu";
 import getIcon from "../../../Utils/getIcon";

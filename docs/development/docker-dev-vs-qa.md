@@ -19,5 +19,5 @@ If you want to build container with same Dockerfile as official to test how appl
  which contains app/db/guacd stack
 
 ```
-docker-compose -f docker-compose-qa.yml up
+docker compose -f docker-compose-qa.yml up
 ```

@@ -11,7 +11,7 @@ when specifying a _**Connection**_
 ### Docker
 To start additional guacd you can use docker 
 ```
-docker run --restart always -p 4822:4822 guacamole/guacd
+docker run --restart always -p 4822:4822 guacamole/guacd:1.6.0
 ```
 ### CentOS
 Or if you are on CentOS 7 you can use epel-release

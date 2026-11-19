@@ -1,5 +1,5 @@
 import React, {useContext, useState} from 'react';
-import {Accordion, Icon} from "semantic-ui-react";
+import {Accordion, Icon} from "../../../ui/ui";
 import TicketsList from "./TicketsList";
 import {AppContext} from "../../../Context/AppContext";
 

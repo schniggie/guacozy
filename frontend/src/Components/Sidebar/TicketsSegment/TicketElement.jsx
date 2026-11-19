@@ -1,6 +1,6 @@
 import React, {useContext} from "react";
 import {AppContext} from "../../../Context/AppContext";
-import {Icon, List} from "semantic-ui-react";
+import {Icon, List} from "../../../ui/ui";
 import TimeAgo from "react-timeago";
 import getIcon from "../../../Utils/getIcon";
 import {formatDateString} from "../../../Utils/formateDateString";

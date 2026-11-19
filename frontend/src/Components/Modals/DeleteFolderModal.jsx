@@ -1,6 +1,6 @@
 import React, {useContext, useState} from 'react';
 import {AppContext} from "../../Context/AppContext";
-import {Button, Header, Icon, Message, Modal} from "semantic-ui-react";
+import {Button, Header, Icon, Message, Modal} from "../../ui/ui";
 import ModalBase from "./ModalBase";
 
 function DeleteFolderModal({handleClose, data}) {
